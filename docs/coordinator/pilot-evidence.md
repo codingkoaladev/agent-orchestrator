@@ -135,3 +135,37 @@ Earlier AppImage/window success statements above are historical and superseded b
 Verified a non-FUSE extracted release renderer with the source-built backend, first on isolated port 3301, then on real port 3001 after proving no workers were active. Playwright confirmed a nonblank GUI, daemon-ready indicator, and both CkAdmin and MageOS project entries. Readiness was HTTP 200 and no extracted desktop process held /dev/fuse. A screenshot was captured locally for this check. No full source-renderer build, passing coordinator implementation review, live ticket journey, or pre-live acceptance is claimed.
 
 Software-rendering follow-up: the first capture was black despite correct DOM readiness. After --disable-gpu, the screenshot visibly contains CkAdmin and MageOS, the project list and settings. Closing/reopening exposed and fixed an inherited lock-descriptor issue in the new launcher; the persistent daemon no longer inherits that lock. Full frontend typecheck failed due to unresolved product-ui dependencies; no pass claimed.
+
+## Core repair evidence (2026-11-11)
+
+The owner confirmed the WSL GUI is visible. Root then repaired the coordinator
+boundaries; this does not prove a full live-ticket journey or pre-live acceptance.
+
+- Real API-shaped transport regressions first failed because `sessions` was
+  decoded as `data`; after repair, live workers and native `agentSessionId` survive
+  decoding, and an unknown envelope fails closed. No network service or model
+  was used by these regressions.
+- Exclusive on-disk ticket claims precede dispatch. Regression coverage verifies
+  refusal after an ambiguous launch, known-worker recovery after a tracker write
+  fails, native-ID duplicate detection, and safe retry after a confirmed
+  subscription-preflight rejection. Fake sessions and tracker ports are used.
+- A project-label change initially overrode a saved worker subscription; the
+  red regression reproduced that switch. The worker pin now wins and the test
+  passes, preserving account scope on resume.
+- Pre-live writes deliberately keep AI Status In Progress until the owner's
+  known auto-Done workflow is corrected. No real Complete/Done write occurred.
+- `npm run api`: passed; source DTO, OpenAPI and frontend types regenerated.
+- `go test ./internal/coordinator ./internal/tracker/youtrack`: passed.
+- `go test -race ./internal/coordinator ./internal/tracker/youtrack`: passed.
+- `go test ./internal/httpd/...`: passed, including controller and schema checks.
+- `go test ./internal/adapters/agent/opencode -run 'Subscription|LabelForSession' -count=1`: passed.
+- `go test ./internal/adapters/chatdriver/opencodev2acp`: passed.
+- `go build ./...` and focused `go vet`: passed.
+- OpenCode v2 adapter tests `TestV2RejectsFailuresWithoutSideEffects` and
+  `TestV2ResolvesAgainBetweenAttempts` fail both on this repair and the unchanged
+  pre-repair commit `cde5d299`; baseline checked in an isolated `/tmp` archive.
+- Full backend suite was invoked; its final outcome and any limits are recorded
+  in the ticket/PR. Do not infer a full-suite pass from the focused checks.
+- Separate Sol 6.1 low-effort standards and specification reviews passed the
+  final core repair diff after one recovery correction. These are static code
+  reviews, not evidence of a live lifecycle or production release readiness.

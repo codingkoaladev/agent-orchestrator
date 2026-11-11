@@ -514,6 +514,8 @@ type WorkspaceTreeEntry struct {
 // prs is a list. The embedded domain.Session.Metadata and domain.Session.PRs
 // fields are json:"-"; these curated fields are what serialize.
 type SessionView struct {
+	// AgentSessionID is the native harness identity, distinct from the daemon session ID.
+	AgentSessionID string `json:"agentSessionId,omitempty"`
 	domain.Session
 	Branch string `json:"branch,omitempty"`
 	// TerminalGeneration is an opaque renderer fence. A restarted controller

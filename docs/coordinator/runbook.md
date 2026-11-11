@@ -119,8 +119,8 @@ adapter resolve the same path: `opencode.V2DataHome` returns
 Resolution order for a worker, applied identically by the TUI adapter and the
 ACP chat driver:
 
-1. project config env `OPENCODE_SUBSCRIPTION`
-2. the worker's own pin file, written at launch and read on resume
+1. the worker's own pin file, written at launch and read on resume
+2. project config env `OPENCODE_SUBSCRIPTION`
 3. the daemon default `AO_OPENCODE_SUBSCRIPTION`
 
 The pin is what makes a restart or resume deterministic: changing a project's
@@ -271,25 +271,42 @@ value of the wrong shape with `$type is required`:
 | submit | In Progress | Awaiting AI Review |
 | review fail | In Progress | Failed AI Review - Corrections Needed |
 | review pass | Code Review | In Progress (AI work stays active) |
-| prelive verified | For Release | Complete |
+| prelive verified | For Release | In Progress (completion automation unsafe) |
 
-`Done` is never set by the bridge, and only a verified pre-live acceptance sets
-`Complete`. CKM has no `Ready for Go Live` value, so a verified pre-live handoff
-maps to `For Release` + `Complete`. The owner confirmed this mapping for both
-workflow tickets.
+The bridge never writes `Done`. During this pilot, pre-live acceptance writes
+`For Release` with AI Status `In Progress`: the owner's current automation can
+move State to Done when AI Status becomes Complete. Do not enable completion
+writes until that automation has been corrected and independently verified.
+This is an interim safety limit; the agreed final mapping remains For Release /
+Complete, with Done reserved for verified production deployment.
 
-Known id-space caveat: `AI Coding Session ID` holds the OpenCode session id,
-while the daemon reports Orchestrator session ids (`pilot-2`). Duplicate-dispatch
-detection compares against the daemon, so it only fires when the ticket records
-an Orchestrator session id. Record both ids in the evidence comment while the
-field holds the OpenCode one.
+Native OpenCode IDs are exposed as `agentSessionId` in the curated session API.
+The coordinator maps them separately from daemon session IDs and uses both when
+checking whether a ticket already has a live worker. A missing or malformed
+`sessions` envelope fails closed.
+
+Before spawning, the coordinator exclusively reserves the ticket's run record.
+It saves the returned worker identity before updating YouTrack. Retrying a known
+worker resumes ticket recording without another launch. An ambiguous POST failure
+leaves a `dispatching` claim and requires operator reconciliation: inspect the
+daemon sessions and ticket, then repair the claim with the confirmed worker
+identity or archive it only after confirming no worker was created. Never delete
+such a claim just to retry. A confirmed subscription-preflight rejection sends no
+POST and releases its claim, allowing a corrected configuration to be retried.
+Terminal runs also require explicit archival before replacement.
+
+`start --subscription <label>` currently verifies the project's explicit
+`config.env.OPENCODE_SUBSCRIPTION` pin; it does not override shared daemon or
+project settings. Set the project pin before dispatch. The request is refused
+when the configured pin differs. Existing workers keep their persisted pin even
+when the project configuration changes.
 
 ## Ticket fields
 
 The four proposed fields now exist on CKM and are written only from observed
 evidence: `AI Reviewer Effort`, `AI Review Session ID`, `AI Last Reviewed Commit`,
 `AI Pre-live Verified Commit`. The owner confirmed during this session that a
-proven pre-live acceptance maps to State `For Release` + AI Status `Complete`.
+final target after proven pre-live acceptance is State `For Release` + AI Status `Complete`; current pilot deliberately keeps AI Status In Progress until the Done automation is corrected.
 
 Field gaps that still block reviewer bookkeeping:
 

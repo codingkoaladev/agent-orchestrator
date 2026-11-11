@@ -62,6 +62,7 @@ const (
 
 // SessionFact is one Orchestrator session as the daemon reports it.
 type SessionFact struct {
+	NativeID     string
 	ID           string
 	Branch       string
 	WorktreePath string
@@ -323,10 +324,10 @@ func validatePrelive(facts Facts, review *ReviewEvidence, prelive *PreliveEviden
 	}
 	fields := map[string]string{
 		FieldState:           StateForRelease,
-		FieldAIStatus:        AIStatusComplete,
+		FieldAIStatus:        AIStatusInProgress,
 		FieldPreliveVerified: submitted,
 	}
-	comment := fmt.Sprintf("Pre-live acceptance verified; ready for go-live authorization.\n\n- Commit: `%s`\n- Check: `%s` (exit 0)\n- Output digest: `%s`\n\nProduction deployment remains a separate owner-authorized step.",
+	comment := fmt.Sprintf("Pre-live acceptance verified; ready for go-live authorization.\n\n- Commit: `%s`\n- Check: `%s` (exit 0)\n- Output digest: `%s`\n\nAI Status remains In Progress because the current completion automation can mark State Done prematurely. Production deployment remains a separate owner-authorized step.",
 		submitted, prelive.Command, prelive.OutputDigest)
 	return Result{
 		Stage:              StagePrelive,

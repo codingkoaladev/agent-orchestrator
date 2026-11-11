@@ -93,6 +93,7 @@ func (d *Daemon) do(ctx context.Context, method, path string, body any, out any)
 
 type sessionWire struct {
 	ID           string `json:"id"`
+	NativeID     string `json:"agentSessionId"`
 	ProjectID    string `json:"projectId"`
 	Branch       string `json:"branch"`
 	Harness      string `json:"harness"`
@@ -106,6 +107,23 @@ type sessionWire struct {
 
 // Spawn starts a worker and resolves its durable identities.
 func (d *Daemon) Spawn(ctx context.Context, request SpawnRequest) (Session, error) {
+	// The daemon currently scopes subscription selection through project Env.
+	// Require an explicit matching pin rather than claiming an ignored override.
+	if request.Subscription != "" {
+		var project struct {
+			Project struct {
+				Config struct {
+					Env map[string]string `json:"env"`
+				} `json:"config"`
+			} `json:"project"`
+		}
+		if err := d.do(ctx, http.MethodGet, "/api/v1/projects/"+request.Project, nil, &project); err != nil {
+			return Session{}, fmt.Errorf("%w: subscription preflight: %v", ErrNotDispatched, err)
+		}
+		if project.Project.Config.Env["OPENCODE_SUBSCRIPTION"] != request.Subscription {
+			return Session{}, fmt.Errorf("%w: requested subscription must match the project's explicit OPENCODE_SUBSCRIPTION pin before dispatch", ErrNotDispatched)
+		}
+	}
 	body := map[string]any{
 		"projectId":   request.Project,
 		"issueId":     request.Issue,
@@ -133,6 +151,7 @@ func (d *Daemon) Spawn(ctx context.Context, request SpawnRequest) (Session, erro
 	}
 	return Session{
 		OrchestratorID: response.Session.ID,
+		NativeID:       response.Session.NativeID,
 		Branch:         firstNonEmpty(response.Session.Branch, request.Branch),
 		WorktreePath:   worktree,
 		Model:          firstNonEmpty(response.Session.Model, request.Model),
@@ -159,16 +178,20 @@ func (d *Daemon) WorktreeFor(projectID, sessionID string) (string, error) {
 // liveness rather than as "nothing is running".
 func (d *Daemon) List(ctx context.Context) ([]youtrack.SessionFact, error) {
 	var response struct {
-		Data []sessionWire `json:"data"`
+		Sessions *[]sessionWire `json:"sessions"`
 	}
 	if err := d.do(ctx, http.MethodGet, "/api/v1/sessions?includeTerminated=true", nil, &response); err != nil {
 		return nil, err
 	}
-	facts := make([]youtrack.SessionFact, 0, len(response.Data))
-	for _, session := range response.Data {
+	if response.Sessions == nil {
+		return nil, errors.New("coordinator: daemon response has no sessions list; liveness unknown")
+	}
+	facts := make([]youtrack.SessionFact, 0, len(*response.Sessions))
+	for _, session := range *response.Sessions {
 		worktree, _ := d.WorktreeFor(session.ProjectID, session.ID)
 		facts = append(facts, youtrack.SessionFact{
 			ID:           session.ID,
+			NativeID:     session.NativeID,
 			Branch:       session.Branch,
 			WorktreePath: worktree,
 			Live:         !session.IsTerminated,
@@ -188,6 +211,7 @@ func (d *Daemon) Get(ctx context.Context, id string) (SessionStatus, error) {
 	worktree, _ := d.WorktreeFor(response.Session.ProjectID, response.Session.ID)
 	return SessionStatus{
 		ID:           response.Session.ID,
+		NativeID:     response.Session.NativeID,
 		Branch:       response.Session.Branch,
 		WorktreePath: worktree,
 		Status:       response.Session.Status,

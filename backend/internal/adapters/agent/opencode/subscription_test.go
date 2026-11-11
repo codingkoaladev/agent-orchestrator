@@ -130,7 +130,7 @@ func TestPrepareV2DataHomeDoesNotCopyLegacyStoreIntoTemplateScope(t *testing.T) 
 	}
 }
 
-func TestLabelForSessionPrefersProjectPinThenWorkerPinThenDaemonDefault(t *testing.T) {
+func TestLabelForSessionPreservesWorkerPinAcrossProjectChanges(t *testing.T) {
 	dataDir := t.TempDir()
 	t.Setenv("AO_DATA_DIR", dataDir)
 	t.Setenv(EnvOpenCodeSubscription, "")
@@ -151,7 +151,7 @@ func TestLabelForSessionPrefersProjectPinThenWorkerPinThenDaemonDefault(t *testi
 	if err := PinSessionLabel(dataDir, "pilot-1", "subscription-3"); err != nil {
 		t.Fatalf("PinSessionLabel() error = %v", err)
 	}
-	label, err = LabelForSession(nil, "pilot-1", "")
+	label, err = LabelForSession(map[string]string{EnvSubscriptionLabel: "subscription-1"}, "pilot-1", "")
 	if err != nil || label != "subscription-3" {
 		t.Fatalf("worker pin after restart = %q, %v", label, err)
 	}

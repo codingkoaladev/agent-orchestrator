@@ -3,6 +3,7 @@ package coordinator
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -19,9 +20,10 @@ const (
 // fakeTicket runs the real guards and then mutates its own ticket facts, so a
 // service bug that builds invalid facts fails here rather than in production.
 type fakeTicket struct {
-	facts   youtrack.TicketFacts
-	applied []youtrack.Stage
-	readErr error
+	facts    youtrack.TicketFacts
+	applied  []youtrack.Stage
+	readErr  error
+	applyErr error
 }
 
 func (f *fakeTicket) Read(context.Context, string) (TicketState, error) {
@@ -32,6 +34,9 @@ func (f *fakeTicket) Read(context.Context, string) (TicketState, error) {
 }
 
 func (f *fakeTicket) Apply(_ context.Context, stage youtrack.Stage, facts youtrack.Facts, review *youtrack.ReviewEvidence, prelive *youtrack.PreliveEvidence) ([]string, error) {
+	if f.applyErr != nil {
+		return nil, f.applyErr
+	}
 	if _, err := youtrack.Validate(stage, facts, review, prelive); err != nil {
 		return nil, err
 	}
@@ -55,7 +60,7 @@ func (f *fakeTicket) Apply(_ context.Context, stage youtrack.Stage, facts youtra
 		}
 	case youtrack.StagePrelive:
 		f.facts.State = youtrack.StateForRelease
-		f.facts.AIStatus = youtrack.AIStatusComplete
+		f.facts.AIStatus = youtrack.AIStatusInProgress
 		f.facts.VerifiedCommit = prelive.Commit
 	}
 	return nil, nil
@@ -352,7 +357,7 @@ func TestPreliveIsGatedOnARecordedPassAndSetsRelease(t *testing.T) {
 	if run.Phase != PhasePreliveVerified {
 		t.Fatalf("phase = %q", run.Phase)
 	}
-	if ticket.facts.State != youtrack.StateForRelease || ticket.facts.AIStatus != youtrack.AIStatusComplete {
+	if ticket.facts.State != youtrack.StateForRelease || ticket.facts.AIStatus != youtrack.AIStatusInProgress {
 		t.Fatalf("release facts = %#v", ticket.facts)
 	}
 }
@@ -413,5 +418,77 @@ func TestAddReviewReplacesAVerdictForTheSameCommit(t *testing.T) {
 	}
 	if _, ok := run.PassingReview(commitTwo); ok {
 		t.Fatal("PassingReview reported a pass for a commit never reviewed")
+	}
+}
+
+func TestAmbiguousDispatchIsNotRetried(t *testing.T) {
+	service, sessions, _, _ := newService(t, &fakeTicket{})
+	// A lost response leaves the launch outcome unknown.
+	sessions.spawnErr = errors.New("response lost after dispatch")
+	if _, err := service.Start(context.Background(), approved()); err == nil {
+		t.Fatal("expected ambiguous dispatch error")
+	}
+	run, err := service.Store.Load("CKM-825")
+	if err != nil || run.Phase != PhaseDispatching {
+		t.Fatalf("missing durable claim: %+v %v", run, err)
+	}
+	sessions.spawnErr = nil
+	if _, err := service.Start(context.Background(), approved()); err == nil {
+		t.Fatal("ambiguous dispatch was retried")
+	}
+	if sessions.spawned != 0 {
+		t.Fatal("duplicate worker started")
+	}
+}
+func TestNativeTicketIdentityPreventsDuplicateDispatch(t *testing.T) {
+	ticket := TicketState{Facts: youtrack.TicketFacts{RecordedSessionID: "ses-native"}}
+	blocked, err := blockingDispatch(ticket, []youtrack.SessionFact{{ID: "daemon-1", NativeID: "ses-native", Live: true}}, approved())
+	if err != nil || blocked == "" {
+		t.Fatal("native session identity did not block duplicate")
+	}
+}
+func TestStoreClaimIsExclusive(t *testing.T) {
+	store := Store{Dir: t.TempDir()}
+	run := Run{Issue: "CKM-825", Phase: PhaseDispatching}
+	if err := store.Claim(context.Background(), run); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Claim(context.Background(), run); !errors.Is(err, ErrAlreadyRunning) {
+		t.Fatalf("second claim: %v", err)
+	}
+}
+
+func TestStartResumesTicketRecordingWithoutAnotherWorker(t *testing.T) {
+	ticket := &fakeTicket{applyErr: errors.New("tracker unavailable")}
+	service, sessions, _, _ := newService(t, ticket)
+	if _, err := service.Start(context.Background(), approved()); err == nil {
+		t.Fatal("expected tracker failure")
+	}
+	run, err := service.Store.Load("CKM-825")
+	if err != nil || run.Coder.OrchestratorID != "pilot-1" || run.Phase != PhaseDispatching {
+		t.Fatalf("worker not durably recorded: %+v %v", run, err)
+	}
+	ticket.applyErr = nil
+	run, err = service.Start(context.Background(), approved())
+	if err != nil || run.Phase != PhaseCoding || run.Coder.NativeID != nativeID {
+		t.Fatalf("failed recovery: %+v %v", run, err)
+	}
+	if sessions.spawned != 1 {
+		t.Fatalf("started %d workers", sessions.spawned)
+	}
+}
+
+func TestRejectedPreflightAllowsCorrectedRetry(t *testing.T) {
+	service, sessions, _, _ := newService(t, &fakeTicket{})
+	sessions.spawnErr = fmt.Errorf("%w: subscription mismatch", ErrNotDispatched)
+	if _, err := service.Start(context.Background(), approved()); err == nil {
+		t.Fatal("expected preflight rejection")
+	}
+	sessions.spawnErr = nil
+	if _, err := service.Start(context.Background(), approved()); err != nil {
+		t.Fatalf("corrected preflight cannot retry: %v", err)
+	}
+	if sessions.spawned != 1 {
+		t.Fatalf("spawned %d", sessions.spawned)
 	}
 }

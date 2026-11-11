@@ -2991,6 +2991,7 @@ func sessionView(r *http.Request, s domain.Session) SessionView {
 	terminalGeneration := s.Metadata.RuntimeLaunchID
 	view := SessionView{
 		Session:            s,
+		AgentSessionID:     s.Metadata.AgentSessionID,
 		Branch:             s.Metadata.Branch,
 		TerminalGeneration: terminalGeneration,
 		PreviewURL:         s.Metadata.PreviewURL,

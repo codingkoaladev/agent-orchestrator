@@ -257,7 +257,7 @@ func TestValidatePreliveRequiresPassingReviewOfTheSubmittedCommitAndRealEvidence
 	if err != nil {
 		t.Fatalf("prelive refused valid evidence: %v", err)
 	}
-	if result.Fields[FieldState] != StateForRelease || result.Fields[FieldAIStatus] != AIStatusComplete {
+	if result.Fields[FieldState] != StateForRelease || result.Fields[FieldAIStatus] != AIStatusInProgress {
 		t.Fatalf("prelive fields = %#v", result.Fields)
 	}
 	if result.ExpectSubmitted != testCommit || result.ExpectLastReviewed != testCommit {

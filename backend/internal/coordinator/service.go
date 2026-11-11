@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -124,6 +125,9 @@ type StartRequest struct {
 var ErrAlreadyRunning = errors.New("coordinator: ticket already has an active run")
 
 // ErrNotApproved reports a missing dispatch authorization.
+// ErrNotDispatched identifies failures proven to occur before any launch request.
+var ErrNotDispatched = errors.New("coordinator: no worker was dispatched")
+
 var ErrNotApproved = errors.New("coordinator: dispatch is not approved for this ticket")
 
 func (s *Service) now() time.Time {
@@ -163,6 +167,21 @@ func (s *Service) Start(ctx context.Context, request StartRequest) (Run, error) 
 	switch {
 	case err == nil:
 		if existing.Phase.Active() {
+			if existing.Phase == PhaseDispatching {
+				if existing.Coder.OrchestratorID == "" {
+					return existing, errors.New("dispatch outcome requires reconciliation; refusing another worker")
+				}
+				facts, err := s.factsFor(ctx, request.Issue, ticket, existing.Coder, sessions)
+				if err != nil {
+					return existing, err
+				}
+				if _, err = s.Tickets.Apply(ctx, youtrack.StageStart, facts, nil, nil); err != nil {
+					return existing, fmt.Errorf("record existing worker on ticket: %w", err)
+				}
+				existing.Coder.NativeID = facts.CoderSessionID
+				existing.Phase = PhaseCoding
+				return existing, s.Store.Save(existing)
+			}
 			if liveSession(sessions, existing.Coder.OrchestratorID) {
 				return existing, fmt.Errorf("%w: %s is %s", ErrAlreadyRunning, existing.Issue, existing.Phase)
 			}
@@ -175,10 +194,8 @@ func (s *Service) Start(ctx context.Context, request StartRequest) (Run, error) 
 			}
 			return existing, nil
 		}
-		// A terminal run may be replaced; keep its review history for audit.
-		if err := s.Store.Save(Run{}); err != nil {
-			return Run{}, err
-		}
+		// Preserve terminal runs for audit; replacement requires explicit archival.
+		return existing, errors.New("ticket already has a recorded run; archive it explicitly before a new dispatch")
 	case !errors.Is(err, ErrNoRun):
 		return Run{}, err
 	}
@@ -189,6 +206,10 @@ func (s *Service) Start(ctx context.Context, request StartRequest) (Run, error) 
 		return Run{}, errors.New(blocked)
 	}
 
+	run := Run{Issue: request.Issue, Project: request.Project, Phase: PhaseDispatching, UpdatedAt: s.now()}
+	if err := s.Store.Claim(ctx, run); err != nil {
+		return Run{}, err
+	}
 	coder, err := s.Sessions.Spawn(ctx, SpawnRequest{
 		Project:      request.Project,
 		Issue:        request.Issue,
@@ -200,9 +221,17 @@ func (s *Service) Start(ctx context.Context, request StartRequest) (Run, error) 
 		DisplayName:  request.Issue + " worker",
 	})
 	if err != nil {
+		if errors.Is(err, ErrNotDispatched) {
+			if releaseErr := os.Remove(s.Store.Path(run.Issue)); releaseErr != nil {
+				return run, fmt.Errorf("spawn rejected: %w; release claim: %v", err, releaseErr)
+			}
+		}
 		return Run{}, fmt.Errorf("spawn coder: %w", err)
 	}
-	now := s.now()
+	run.Coder = coder
+	if err := s.Store.Save(run); err != nil {
+		return run, err
+	}
 	facts, err := s.factsFor(ctx, request.Issue, ticket, coder, sessions)
 	if err != nil {
 		return Run{}, err
@@ -210,13 +239,8 @@ func (s *Service) Start(ctx context.Context, request StartRequest) (Run, error) 
 	if _, err := s.Tickets.Apply(ctx, youtrack.StageStart, facts, nil, nil); err != nil {
 		return Run{}, fmt.Errorf("record start on ticket: %w", err)
 	}
-	run := Run{
-		Issue:     request.Issue,
-		Project:   request.Project,
-		Phase:     PhaseCoding,
-		Coder:     coder,
-		UpdatedAt: now,
-	}
+	run.Phase = PhaseCoding
+	run.Coder.NativeID = facts.CoderSessionID
 	if err := s.Store.Save(run); err != nil {
 		return Run{}, err
 	}
@@ -232,7 +256,7 @@ func blockingDispatch(ticket TicketState, sessions []youtrack.SessionFact, reque
 		return "", nil
 	}
 	for _, session := range sessions {
-		if session.ID == recorded && session.Live {
+		if (session.ID == recorded || session.NativeID == recorded) && session.Live {
 			return fmt.Sprintf("ticket records live session %s; refusing another dispatch", recorded), nil
 		}
 	}

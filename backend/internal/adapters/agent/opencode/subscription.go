@@ -98,21 +98,21 @@ func dataHomeParent() (string, error) {
 const EnvSubscriptionLabel = "OPENCODE_SUBSCRIPTION"
 
 // LabelForSession resolves the subscription a worker must keep for its whole
-// life: an explicit project label wins, then the worker's own pin, then the
+// life: the worker's own pin wins, then an explicit project label, then the
 // daemon default. The pin is what makes a restart or resume land in the same
 // account scope as the original launch.
 func LabelForSession(env map[string]string, sessionID string, dataDir string) (string, error) {
-	if label := strings.TrimSpace(env[EnvSubscriptionLabel]); label != "" {
-		if !subscriptionLabelPattern.MatchString(label) {
-			return "", fmt.Errorf("opencode: %s must match %s, got %q", EnvSubscriptionLabel, subscriptionLabelPattern, label)
-		}
-		return label, nil
-	}
 	if pin := strings.TrimSpace(readPinnedLabel(dataDir, sessionID)); pin != "" {
 		if !subscriptionLabelPattern.MatchString(pin) {
 			return "", fmt.Errorf("opencode: pinned subscription label is invalid, got %q", pin)
 		}
 		return pin, nil
+	}
+	if label := strings.TrimSpace(env[EnvSubscriptionLabel]); label != "" {
+		if !subscriptionLabelPattern.MatchString(label) {
+			return "", fmt.Errorf("opencode: %s must match %s, got %q", EnvSubscriptionLabel, subscriptionLabelPattern, label)
+		}
+		return label, nil
 	}
 	return SubscriptionLabel()
 }

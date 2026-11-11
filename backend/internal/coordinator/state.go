@@ -8,6 +8,7 @@
 package coordinator
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,6 +26,7 @@ import (
 type Phase string
 
 const (
+	PhaseDispatching     Phase = "dispatching"
 	PhaseCoding          Phase = "coding"
 	PhaseAwaitingReview  Phase = "awaiting_review"
 	PhaseReviewing       Phase = "reviewing"
@@ -40,7 +42,7 @@ const (
 // while an active phase exists requires the recorded session to be gone.
 func (p Phase) Active() bool {
 	switch p {
-	case PhaseCoding, PhaseAwaitingReview, PhaseReviewing, PhaseCorrecting, PhaseReviewPassed, PhaseAwaitingPrelive:
+	case PhaseDispatching, PhaseCoding, PhaseAwaitingReview, PhaseReviewing, PhaseCorrecting, PhaseReviewPassed, PhaseAwaitingPrelive:
 		return true
 	}
 	return false
@@ -230,4 +232,35 @@ func (r *Run) AddReview(review Review) {
 		return existing.Commit == review.Commit
 	})
 	r.Reviews = append(r.Reviews, review)
+}
+
+// Claim reserves a ticket before any external dispatch. The exclusive durable
+// file survives crashes and prevents concurrent coordinators starting workers.
+// An ambiguous dispatch is reconciled by an operator, never retried blindly.
+func (s Store) Claim(ctx context.Context, run Run) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !issueFilePattern.MatchString(run.Issue) {
+		return errors.New("coordinator: invalid issue id")
+	}
+	if err := os.MkdirAll(s.Dir, 0700); err != nil {
+		return err
+	}
+	data, err := json.Marshal(run)
+	if err != nil {
+		return err
+	}
+	f, err := os.OpenFile(s.Path(run.Issue), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if errors.Is(err, os.ErrExist) {
+		return ErrAlreadyRunning
+	}
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if _, err = f.Write(data); err != nil {
+		return err
+	}
+	return f.Sync()
 }

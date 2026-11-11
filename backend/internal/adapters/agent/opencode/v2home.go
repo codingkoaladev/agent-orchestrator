@@ -25,22 +25,22 @@ const v2DataHomeDirName = "opencode-v2-home"
 // V2DataHome returns the XDG_DATA_HOME OpenCode 2 runs with: a sibling of the
 // user's own data home, so OpenCode 1 and 2 never share a database.
 func V2DataHome() (string, error) {
-	parent := strings.TrimSpace(os.Getenv("XDG_DATA_HOME"))
-	if parent != "" && !filepath.IsAbs(parent) {
-		return "", fmt.Errorf("opencode: XDG_DATA_HOME must be absolute, got %q", parent)
+	// A pinned subscription label owns the whole data home, so saved accounts,
+	// sessions and provider state for that subscription never mix with another
+	// one. See EnvOpenCodeSubscription.
+	label, err := SubscriptionLabel()
+	if err != nil {
+		return "", err
+	}
+	if label != "" {
+		return SubscriptionDataHome(label)
+	}
+	parent, err := dataHomeParent()
+	if err != nil {
+		return "", err
 	}
 	if filepath.Base(parent) == v2DataHomeDirName {
 		return filepath.Clean(parent), nil
-	}
-	if parent == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", fmt.Errorf("opencode: resolve absolute user data home: %w", err)
-		}
-		if !filepath.IsAbs(home) {
-			return "", fmt.Errorf("opencode: user data home must be absolute, got %q", home)
-		}
-		parent = filepath.Join(home, ".local", "share")
 	}
 	return filepath.Join(parent, v2DataHomeDirName), nil
 }
@@ -136,6 +136,17 @@ var v2DataMigrationLock = make(chan struct{}, 1)
 // pre-isolation OpenCode store into it once. The legacy store is left intact
 // for OpenCode 1; an existing isolated store is never overwritten.
 func PrepareV2DataHome(ctx context.Context) (string, error) {
+	// A pinned subscription is a fresh, isolated store. Never copy the legacy
+	// store into it: that would duplicate saved credentials and session history
+	// into a scope the operator did not log in to.
+	if label, err := SubscriptionLabel(); err != nil {
+		return "", err
+	} else if label != "" {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		return PrepareSubscriptionDataHome(label)
+	}
 	select {
 	case v2DataMigrationLock <- struct{}{}:
 		defer func() { <-v2DataMigrationLock }()

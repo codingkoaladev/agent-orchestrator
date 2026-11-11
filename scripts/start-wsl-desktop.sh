@@ -73,9 +73,9 @@ unset APPIMAGE AO_APPIMAGE AO_DAEMON_COMMAND
 export AO_OPENCODE_SUBSCRIPTION="${AO_OPENCODE_SUBSCRIPTION:-subscription-3}"
 export AO_TELEMETRY_REMOTE=off
 export AO_KEEP_DAEMON=1
-args=()
+args=(--disable-gpu)
 if [[ -n "${AO_LOCAL_DESKTOP_DEBUG_PORT:-}" ]]; then
   [[ "$AO_LOCAL_DESKTOP_DEBUG_PORT" =~ ^[0-9]+$ ]] || exit 2
   args+=(--remote-debugging-address=127.0.0.1 "--remote-debugging-port=$AO_LOCAL_DESKTOP_DEBUG_PORT")
 fi
-"$app_dir/AppRun" "${args[@]}"
+"$app_dir/AppRun" "${args[@]}" 9>&-

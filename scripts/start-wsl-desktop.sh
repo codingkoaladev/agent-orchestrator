@@ -2,7 +2,8 @@
 # Launch the local desktop without executing the AppImage/FUSE runtime.
 set +x
 set -euo pipefail
-repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+script_path="$(readlink -f -- "${BASH_SOURCE[0]}")"
+repo_dir="$(cd "$(dirname "$script_path")/.." && pwd)"
 if [[ "${1:-}" == "--help" ]]; then
   printf '%s\n' 'Usage: scripts/start-wsl-desktop.sh [--replace-service]' 'Uses the installed image as a data archive and the current source-built daemon.'
   exit 0

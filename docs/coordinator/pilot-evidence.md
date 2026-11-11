@@ -169,3 +169,12 @@ boundaries; this does not prove a full live-ticket journey or pre-live acceptanc
 - Separate Sol 6.1 low-effort standards and specification reviews passed the
   final core repair diff after one recovery correction. These are static code
   reviews, not evidence of a live lifecycle or production release readiness.
+
+## Installed shortcut path repair (2026-11-11)
+
+The installed `koala-coordinator` symlink initially resolved the repository
+relative to `~/.local/bin`, falsely reporting the installed image/backend missing.
+An isolated symlink fixture reproduced that exact message before the fix. The
+launcher now resolves its own real path first; the same fixture reaches the
+intentional lock stop without starting an app. `bash -n` and diff checks passed.
+This patch does not stop or replace the CKA-1004 worker or daemon.

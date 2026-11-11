@@ -27,7 +27,7 @@ export function resolveDaemonLaunch(
 		return {
 			command: configuredCommand,
 			args: [],
-			cwd: appPath,
+			cwd: isPackaged ? homeDir : appPath,
 			shell: true,
 			source: "configured",
 		};

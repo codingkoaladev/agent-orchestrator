@@ -127,3 +127,9 @@ now enforces what the review found unproven.
 - The coordinator lifecycle is proven against synthetic daemon, reviewer and
   tracker ports plus a live spawn probe; it has not yet run a full live
   ticket-to-review cycle, because that requires the owner's ticket dispatch.
+
+## Superseding GUI evidence (2026-11-11)
+
+Earlier AppImage/window success statements above are historical and superseded by the later owner-reported FUSE stall. Root reproduced a blank extracted desktop with `spawn ENOTDIR`, added a failing real-process regression test and corrected the configured packaged launch directory. The targeted frontend file now passes all 12 tests.
+
+Verified a non-FUSE extracted release renderer with the source-built backend, first on isolated port 3301, then on real port 3001 after proving no workers were active. Playwright confirmed a nonblank GUI, daemon-ready indicator, and both CkAdmin and MageOS project entries. Readiness was HTTP 200 and no extracted desktop process held /dev/fuse. A screenshot was captured locally for this check. No full source-renderer build, passing coordinator implementation review, live ticket journey, or pre-live acceptance is claimed.

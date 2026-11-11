@@ -12,7 +12,7 @@ upstream distribution guide; see the repository `README.md` for that.
 | Item | Value |
 | --- | --- |
 | Host | Existing WSL2 Ubuntu 22.04 distribution, WSLg display |
-| Interface | Desktop app through WSLg. Verified running on this host from the installed release AppImage (`~/.ao/agent-orchestrator.AppImage`, window `Orchestrator.inc` 1320x860). Building this checkout's own desktop is blocked on the host C++ toolchain. |
+| Interface | Linux desktop through WSLg, extracted without FUSE from the installed release image; its backend executable is replaced by this checkout's source-built daemon. Start with `scripts/start-wsl-desktop.sh --replace-service`. Verified ready with both registered projects on 2026-11-11. |
 | Daemon | `ao daemon` on loopback only (`127.0.0.1:3001`, `[::1]:3001`), started either by the desktop app or by the systemd user unit — never both |
 | Source | `/home/pawel/projects/koala-orchestrator` |
 | State | `~/.ao` (`~/.ao/data`, `~/.ao/data/worktrees`, `~/.ao/running.json`) |
@@ -328,3 +328,15 @@ Field gaps that still block reviewer bookkeeping:
   installation could post YouTrack comments but was denied field updates by its
   approval policy; treat reviewer write access as something to constrain
   explicitly, not something Orchestrator blocks for you.
+
+## WSL desktop repair (2026-11-11)
+
+The earlier AppImage window observation did not establish reliable GUI operation: the owner subsequently reported a high-CPU orphaned FUSE runtime. Direct AppImage launch is no longer the recommended local path.
+
+Use `scripts/start-wsl-desktop.sh --replace-service` or the installed `Koala Coordinator (WSL)` desktop entry. The script reads the image as a SquashFS data archive using `unsquashfs`; it never executes the AppImage runtime. Extraction is cached under a content hash in `~/.ao/desktop-extracted/`. It installs this checkout's source-built backend into that private extracted payload and launches AppRun. This uses the release renderer with the custom source backend; it is not a full rebuild of the custom renderer. Future renderer builds still need a suitable C++ compiler.
+
+The launcher refuses a second launch and refuses to stop the systemd service if any worker activity is active or unknown. Preparation occurs before service shutdown. A failed GUI launch restores the source service when the backend is unhealthy. `AO_KEEP_DAEMON=1` keeps the backend alive when the window closes. Only one supervisor should manage the same state and port.
+
+An isolated launch exposed a separate `spawn ENOTDIR` defect: configured packaged-daemon launches used app.asar as an OS working directory. The source resolver now chooses the real home directory for this case. The regression test performs a real subprocess launch with an archive fixture; it failed with ENOTDIR before the fix and passed afterward. The extracted local deployment uses the bundled-daemon path, avoiding this bug in the release renderer.
+
+Verification: isolated port 3301 and scratch state first; then actual coordinator on port 3001 after confirming all existing workers were exited. Playwright inspected the real Electron window through a temporary loopback debugging port: nonblank renderer, daemon ready, CkAdmin and Magento entries visible. Backend readiness returned HTTP 200; the executable resolved to the extracted payload's source-built ao; extracted desktop processes had zero /dev/fuse descriptors. Desktop access does not establish coordinator lifecycle correctness or pre-live acceptance; remaining dispatch/subscription/automation findings still block a real task.

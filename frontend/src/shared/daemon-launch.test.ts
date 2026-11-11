@@ -1,7 +1,28 @@
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { bundledDaemonIdentityError, resolveDaemonLaunch } from "./daemon-launch";
 
 describe("resolveDaemonLaunch", () => {
+	it("launches a configured daemon when the packaged app path is an archive", () => {
+		const home = mkdtempSync(join(tmpdir(), "ao-daemon-cwd-"));
+		try {
+			const archive = join(home, "app.asar");
+			writeFileSync(archive, "archive fixture");
+			const launch = resolveDaemonLaunch(
+				{ AO_DAEMON_COMMAND: "ao daemon" }, true, home, archive, home, process.platform,
+			);
+			expect(launch).not.toBeNull();
+			const child = spawnSync(process.execPath, ["-e", "process.exit(0)"], { cwd: launch!.cwd });
+			expect(child.error).toBeUndefined();
+			expect(child.status).toBe(0);
+		} finally {
+			rmSync(home, { recursive: true, force: true });
+		}
+	});
+
 	it("uses AO_DAEMON_COMMAND when configured", () => {
 		expect(
 			resolveDaemonLaunch({ AO_DAEMON_COMMAND: "/tmp/ao daemon" }, false, "/resources", "/app", "/home/user", "darwin"),

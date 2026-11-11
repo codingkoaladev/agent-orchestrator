@@ -91,3 +91,71 @@ func dataHomeParent() (string, error) {
 	}
 	return filepath.Join(home, ".local", "share"), nil
 }
+
+// EnvSubscriptionLabel lets a project pin its workers to a subscription without
+// touching the daemon-wide default. AO reserves the AO_ prefix, so this is the
+// project-config key the adapter reads.
+const EnvSubscriptionLabel = "OPENCODE_SUBSCRIPTION"
+
+// LabelForSession resolves the subscription a worker must keep for its whole
+// life: an explicit project label wins, then the worker's own pin, then the
+// daemon default. The pin is what makes a restart or resume land in the same
+// account scope as the original launch.
+func LabelForSession(env map[string]string, sessionID string, dataDir string) (string, error) {
+	if label := strings.TrimSpace(env[EnvSubscriptionLabel]); label != "" {
+		if !subscriptionLabelPattern.MatchString(label) {
+			return "", fmt.Errorf("opencode: %s must match %s, got %q", EnvSubscriptionLabel, subscriptionLabelPattern, label)
+		}
+		return label, nil
+	}
+	if pin := strings.TrimSpace(readPinnedLabel(dataDir, sessionID)); pin != "" {
+		if !subscriptionLabelPattern.MatchString(pin) {
+			return "", fmt.Errorf("opencode: pinned subscription label is invalid, got %q", pin)
+		}
+		return pin, nil
+	}
+	return SubscriptionLabel()
+}
+
+// PinSessionLabel records the label a worker launched with, so a later resume
+// reuses it even if the project configuration changes.
+func PinSessionLabel(dataDir, sessionID, label string) error {
+	label = strings.TrimSpace(label)
+	if label == "" || !subscriptionLabelPattern.MatchString(label) {
+		return fmt.Errorf("opencode: cannot pin invalid subscription label %q", label)
+	}
+	if strings.TrimSpace(sessionID) == "" {
+		return fmt.Errorf("opencode: cannot pin a subscription without a session id")
+	}
+	dir := filepath.Join(AODataDir(dataDir), "coordinator", "subscriptions")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("opencode: create subscription pin dir: %w", err)
+	}
+	return os.WriteFile(filepath.Join(dir, sessionID), []byte(label+"\n"), 0o600)
+}
+
+// AODataDir resolves AO's state data directory.
+func AODataDir(explicit string) string {
+	if dir := strings.TrimSpace(explicit); dir != "" {
+		return dir
+	}
+	if dir := strings.TrimSpace(os.Getenv("AO_DATA_DIR")); dir != "" {
+		return dir
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ".ao/data"
+	}
+	return filepath.Join(home, ".ao", "data")
+}
+
+func readPinnedLabel(dataDir, sessionID string) string {
+	if strings.TrimSpace(sessionID) == "" {
+		return ""
+	}
+	data, err := os.ReadFile(filepath.Join(AODataDir(dataDir), "coordinator", "subscriptions", sessionID))
+	if err != nil {
+		return ""
+	}
+	return string(data)
+}

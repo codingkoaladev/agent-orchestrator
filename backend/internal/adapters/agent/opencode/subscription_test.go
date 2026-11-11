@@ -129,3 +129,46 @@ func TestPrepareV2DataHomeDoesNotCopyLegacyStoreIntoTemplateScope(t *testing.T) 
 		t.Fatalf("legacy store was modified: %v", err)
 	}
 }
+
+func TestLabelForSessionPrefersProjectPinThenWorkerPinThenDaemonDefault(t *testing.T) {
+	dataDir := t.TempDir()
+	t.Setenv("AO_DATA_DIR", dataDir)
+	t.Setenv(EnvOpenCodeSubscription, "")
+
+	// Default when nothing is configured.
+	label, err := LabelForSession(nil, "pilot-1", "")
+	if err != nil || label != "" {
+		t.Fatalf("LabelForSession() = %q, %v; want empty default", label, err)
+	}
+
+	// Project pin wins.
+	label, err = LabelForSession(map[string]string{EnvSubscriptionLabel: "subscription-1"}, "pilot-1", "")
+	if err != nil || label != "subscription-1" {
+		t.Fatalf("project pin = %q, %v", label, err)
+	}
+
+	// The worker pin survives a project change and a restart.
+	if err := PinSessionLabel(dataDir, "pilot-1", "subscription-3"); err != nil {
+		t.Fatalf("PinSessionLabel() error = %v", err)
+	}
+	label, err = LabelForSession(nil, "pilot-1", "")
+	if err != nil || label != "subscription-3" {
+		t.Fatalf("worker pin after restart = %q, %v", label, err)
+	}
+	label, err = LabelForSession(nil, "pilot-2", "")
+	if err != nil || label != "" {
+		t.Fatalf("an unrelated worker inherited a pin: %q, %v", label, err)
+	}
+
+	// Daemon default is the last resort.
+	t.Setenv(EnvOpenCodeSubscription, "subscription-2")
+	label, err = LabelForSession(nil, "pilot-3", "")
+	if err != nil || label != "subscription-2" {
+		t.Fatalf("daemon default = %q, %v", label, err)
+	}
+
+	// Invalid pins are refused rather than silently ignored.
+	if err := PinSessionLabel(dataDir, "pilot-4", "../escape"); err == nil {
+		t.Fatal("PinSessionLabel accepted a traversing label")
+	}
+}

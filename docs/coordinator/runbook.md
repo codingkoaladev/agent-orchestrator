@@ -12,7 +12,7 @@ upstream distribution guide; see the repository `README.md` for that.
 | Item | Value |
 | --- | --- |
 | Host | Existing WSL2 Ubuntu 22.04 distribution, WSLg display |
-| Interface | Desktop app from this checkout (Electron, WSLg) |
+| Interface | Desktop app from this checkout (Electron, WSLg); currently blocked on the host C++ toolchain, daemon path in use |
 | Daemon | Native `ao daemon`, loopback only (`127.0.0.1:3001` and `[::1]:3001`) |
 | Source | `/home/pawel/projects/koala-orchestrator` |
 | State | `~/.ao` (`~/.ao/data`, `~/.ao/data/worktrees`, `~/.ao/running.json`) |
@@ -83,7 +83,9 @@ process ever switches another worker's credential.
 
 | Piece | Location |
 | --- | --- |
-| Label | `AO_OPENCODE_SUBSCRIPTION` (for example `subscription-3`) |
+| Daemon default label | `AO_OPENCODE_SUBSCRIPTION` |
+| Per-project label | project config env `OPENCODE_SUBSCRIPTION` (the `AO_` prefix is reserved) |
+| Per-worker pin | `~/.ao/data/coordinator/subscriptions/<session-id>` |
 | Scope data home | `~/.local/share/opencode-subscriptions/<label>` |
 | Scope state home | `~/.local/state/opencode-subscription-<label>` |
 | Managed by | `scripts/opencode-subscription.sh` |
@@ -101,23 +103,70 @@ adapter resolve the same path: `opencode.V2DataHome` returns
 `<parent>/opencode-subscriptions/<label>` when the label is set and the previous
 `<parent>/opencode-v2-home` otherwise.
 
+Resolution order for a worker, applied identically by the TUI adapter and the
+ACP chat driver:
+
+1. project config env `OPENCODE_SUBSCRIPTION`
+2. the worker's own pin file, written at launch and read on resume
+3. the daemon default `AO_OPENCODE_SUBSCRIPTION`
+
+The pin is what makes a restart or resume deterministic: changing a project's
+label later does not move an existing worker into a different account scope, and
+two projects pinned to different subscriptions run side by side in one daemon.
+
 Rules that keep this safe:
 
-- One label per daemon. Every OpenCode 2 session that daemon launches inherits
-  the pinned scope, including session resume, because the scope is derived from
-  the daemon's environment rather than from a per-launch switch.
 - Never run `opencode auth switch` against a scope another worker is using.
-- Two daemons with different labels may run side by side; they must also use
-  distinct `AO_DATA_DIR`/`AO_RUN_FILE` and a distinct daemon port, and each needs
-  its own `XDG_STATE_HOME` to avoid the shared `~/.config/opencode/service.json`
-  managed-service port.
+  Selecting an account means selecting a data home, not switching a shared store.
 - Manual CLI work outside the daemon should pass `--standalone`, which is what
   the adapter uses; without it OpenCode tries to reach the shared managed
   service on port 49376.
+- Two daemons are no longer required for two subscriptions, but if you do run
+  two, give each its own `AO_DATA_DIR`/`AO_RUN_FILE`, port and `XDG_STATE_HOME`.
 
-Known limit: selection is per daemon, not per session. Running two different
-subscriptions inside one daemon needs a per-session account field that this
-change does not add; run a second daemon with its own data dir instead.
+## Coordinator lifecycle
+
+`ao-coordinator` is the entry point that takes a ticket and runs the lifecycle.
+It is a real service over the daemon's HTTP API and the YouTrack REST API, not a
+collection of marker commands:
+
+```bash
+# Dispatch (or reconcile) the coder for a ticket
+ao-coordinator start --issue CKM-825 --project ckadmin --branch CKM-825 \
+  --model opencode-go/deepseek-v4.1-flash --approved \
+  --prompt "Implement CKM-825 per the ticket contract"
+
+# Wait for a commit without spending model turns, then review it
+ao-coordinator review --issue CKM-825 --base <base-sha>
+
+# After deployment to the pre-live environment
+ao-coordinator prelive --issue CKM-825 --prelive-command "<check command>"
+ao-coordinator status --issue CKM-825
+```
+
+What the service does:
+
+| Phase | Behaviour |
+| --- | --- |
+| `coding` | spawns a worker on the ticket's branch; records Orchestrator session id, native id, worktree, model, effort and subscription |
+| `awaiting_review` | polls the checkout for a committed, clean tree; no model calls |
+| `reviewing` | runs the independent reviewer on the exact submitted commit, records verdict, session, model, effort |
+| `correcting` | sends the findings to the same coder session, waits for a new commit, submits it, reviews again (bounded rounds) |
+| `awaiting_prelive` | review passed; AI work stays active |
+| `prelive_verified` | the configured pre-live check exited 0 for the reviewed commit |
+
+Guard rails that are enforced in code, not prose:
+
+- Duplicate dispatch is refused while the recorded session is live. If the
+  daemon cannot answer, `start` fails: unknown liveness never authorises a
+  dispatch. Restarting the command reconciles the existing run instead of
+  spawning a second worker.
+- A run records both identities, so a ticket that stores the native OpenCode id
+  is still matched against daemon liveness.
+- A review verdict exists only after the reviewer process ran; a caller cannot
+  assert one. The verdict is bound to the commit the ticket records.
+- Every transition re-reads the ticket and refuses to overwrite a newer
+  submission (compare-and-set on the submitted and reviewed commit).
 
 ## Persisted defaults
 
@@ -184,8 +233,8 @@ stale key is an owner follow-up.
 | --- | --- |
 | `start` | session, branch, worktree or coder model missing; the ticket's recorded session is live and different (duplicate dispatch) |
 | `submit` | commit is not a full 40-character SHA; the worktree is not on the recorded branch or does not contain the commit |
-| `review` | reviewed commit differs from the submitted one; reviewer session equals the coding session (self-review); reviewer model equals the coder model |
-| `prelive` | no reviewed commit; reviewed commit differs from the pre-live commit; no evidence text |
+| `review` | no recorded review for the commit; ticket submitted commit differs from the commit under review; reviewer session equals the coding session (self-review); reviewer model equals the coder model |
+| `prelive` | no recorded passing review; ticket reviewed commit differs from the submitted one; no recorded check; check exited non-zero; evidence covers another commit |
 
 `Apply` writes the comment first (skipping an identical one already at the top of
 the ticket, so a retry does not stack evidence), skips fields the project does
@@ -208,12 +257,13 @@ value of the wrong shape with `$type is required`:
 | start | In Progress | In Progress |
 | submit | In Progress | Awaiting AI Review |
 | review fail | In Progress | Failed AI Review - Corrections Needed |
-| review pass | Code Review | Complete |
+| review pass | Code Review | In Progress (AI work stays active) |
 | prelive verified | For Release | Complete |
 
-`Done` is never set by the bridge. CKM has no `Ready for Go Live` value, so a
-verified pre-live handoff maps to `For Release` + `Complete`. The owner confirmed
-this mapping for both workflow tickets.
+`Done` is never set by the bridge, and only a verified pre-live acceptance sets
+`Complete`. CKM has no `Ready for Go Live` value, so a verified pre-live handoff
+maps to `For Release` + `Complete`. The owner confirmed this mapping for both
+workflow tickets.
 
 Known id-space caveat: `AI Coding Session ID` holds the OpenCode session id,
 while the daemon reports Orchestrator session ids (`pilot-2`). Duplicate-dispatch
@@ -242,13 +292,17 @@ Field gaps that still block reviewer bookkeeping:
 ## Pending owner work
 
 - Add reviewer choices (`gpt-6.1-sol`) and the `low` effort value to the CKM and
-  CKA project field bundles.
+  CKA project field bundles. Until then `ao-youtrack` reports `AI Reviewer Model`
+  and `AI Reviewer Effort` as skipped instead of substituting a reviewer.
 - Repair or retire the `YOUTRACK_AUTH_TOKEN` entry; `YOUTRACK_TOKEN` is the one
   that authenticates today.
 - Provide the pre-live environment and its evidence procedure; no pre-live claim
   can be made today.
-- Launch and verify the Electron desktop through WSLg once, then decide whether
-  the pilot keeps using the systemd unit or the desktop-managed daemon.
+- Install a newer C++ toolchain to build the desktop: Electron 44's headers fail
+  against g++ 11.4 (`g++-12` is available from apt, 12.3.0, and needs a
+  privileged install). Until then the daemon path is the verified interface.
+- Decide whether the pilot keeps using the systemd unit or the desktop-managed
+  daemon once the desktop builds.
 
 ## Security notes
 

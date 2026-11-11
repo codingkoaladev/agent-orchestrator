@@ -96,7 +96,24 @@ workspace preserved.
 Pilot transitions were dry runs only: the ticket's own `AI Coding Session ID`
 and commit fields describe the coordinator implementation, not the fixture.
 
-## 5. Not proven
+## 5. Corrections after the failed independent review
+
+The first independent review (gpt-6.1-sol, low) failed at `9d27d0f7b8`. The
+corrections below were implemented and re-tested on the same session; the code
+now enforces what the review found unproven.
+
+| Finding | Correction and evidence |
+| --- | --- |
+| Pre-live and review trusted caller-supplied SHAs | Guards bind to the freshly read ticket. `ao-youtrack review` requires a verdict recorded by the coordinator run store for the commit the ticket reports; `prelive` requires a recorded passing review **and** a recorded check for the same commit. Regression tests: `TestValidateReviewBindsToTheLiveTicketAndRecordedVerdict`, `TestValidatePreliveRequiresPassingReviewOfTheSubmittedCommitAndRealEvidence`. |
+| A failed review could still reach For Release | `AI Last Reviewed Commit` alone is never treated as a pass: the verdict is read from the run record, and a fail verdict is refused. `TestValidatePrelive…` covers the failed-review case explicitly. |
+| Stale reviews could overwrite current fields | Compare-and-set on the submitted and reviewed commit, re-checked immediately before the write. `TestApplyAbortsWhenTheTicketSubmissionChangesMidFlight`. |
+| AI Status completed at review | Passing review now sets `Code Review` + `AI In Progress`. `TestPassingReviewKeepsAIWorkInProgress`; only `prelive` sets `For Release` + `Complete`. |
+| Duplicate protection failed open | `start` fails when the daemon cannot answer; both identities are persisted. `TestStartFailsClosedWhenLivenessIsUnknown`, `TestStartRefusesWhenTheTicketRecordsAnotherLiveSession`, `TestRestartResumesWithoutASecondDispatch`. |
+| No wired coordinator | `ao-coordinator` runs the loop over the daemon and YouTrack APIs: spawn or reconcile, wait without model calls, review the exact commit, return findings to the same coder, re-review, gate pre-live. `TestReviewLoopReturnsFindingsAndPassingReviewKeepsAIInProgress`, `TestPreliveIsGatedOnARecordedPassAndSetsRelease`. |
+| Subscription was per daemon | Per-project `OPENCODE_SUBSCRIPTION` plus a per-worker pin file, read by both the TUI adapter and the ACP chat driver. Live probe: session `pilot-5` (project pinned to `subscription-1`) created OpenCode session `ses_e3528845affe0WdHDyO8BXZu6j` in the `subscription-1` scope while `subscription-3` gained no session. `TestLabelForSessionPrefersProjectPinThenWorkerPinThenDaemonDefault`, `TestConfigureUsesTheWorkersPinnedSubscription`. |
+| Desktop unverified | Attempted with the isolated desktop lab. Blocked on the host toolchain, not on AO: Electron 44 headers fail against g++ 11.4 (`v8-primitive.h` / `v8config.h` errors). `g++-12` is available from apt (`12.3.0-1ubuntu1~22.04.3`) and is not installed. Installing it is a privileged OS step left to the owner. |
+
+## 6. Not proven
 
 - The Electron desktop has not been launched through WSLg yet.
 - No pre-live environment exists, so no pre-live transition has been attempted.
@@ -105,3 +122,8 @@ and commit fields describe the coordinator implementation, not the fixture.
   be written until their bundles gain the required choices.
 - `AI Automation Enabled` is unwritten, and no pre-live transition has been
   attempted because no pre-live environment exists.
+- The Electron desktop cannot build on this host until a newer C++ compiler is
+  installed (see the corrections table).
+- The coordinator lifecycle is proven against synthetic daemon, reviewer and
+  tracker ports plus a live spawn probe; it has not yet run a full live
+  ticket-to-review cycle, because that requires the owner's ticket dispatch.

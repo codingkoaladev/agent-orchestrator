@@ -132,6 +132,27 @@ func v1HomebrewCandidates() []string { return homebrewOptBinaries("opencode") }
 
 var v2DataMigrationLock = make(chan struct{}, 1)
 
+// V2DataHomeForLabel returns the data home for an explicit subscription label,
+// or the default one when the label is empty. It never copies the legacy store
+// into a pinned scope.
+func V2DataHomeForLabel(label string) (string, error) {
+	if strings.TrimSpace(label) == "" {
+		return V2DataHome()
+	}
+	return SubscriptionDataHome(label)
+}
+
+// PrepareV2DataHomeForLabel prepares the data home for an explicit label.
+func PrepareV2DataHomeForLabel(ctx context.Context, label string) (string, error) {
+	if strings.TrimSpace(label) == "" {
+		return PrepareV2DataHome(ctx)
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	return PrepareSubscriptionDataHome(label)
+}
+
 // PrepareV2DataHome returns the isolated OpenCode 2 data home after copying a
 // pre-isolation OpenCode store into it once. The legacy store is left intact
 // for OpenCode 1; an existing isolated store is never overwritten.

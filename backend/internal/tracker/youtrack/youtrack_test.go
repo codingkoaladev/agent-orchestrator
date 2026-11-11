@@ -79,7 +79,7 @@ func TestUpdateFieldsPostsValuesAndCommentUsesBearer(t *testing.T) {
 	if err := client.Comment(context.Background(), "CKM-825", "evidence"); err != nil {
 		t.Fatalf("Comment() error = %v", err)
 	}
-	if err := client.UpdateFields(context.Background(), "CKM-825", map[string]string{FieldState: "In Progress"}); err != nil {
+	if err := client.UpdateFields(context.Background(), "CKM-825", map[string]Value{FieldState: {Text: "In Progress", Kind: KindState}}); err != nil {
 		t.Fatalf("UpdateFields() error = %v", err)
 	}
 	if !sawBearer {
@@ -90,8 +90,11 @@ func TestUpdateFieldsPostsValuesAndCommentUsesBearer(t *testing.T) {
 		t.Fatalf("posted body = %#v", posted)
 	}
 	entry := custom[0].(map[string]any)
-	if entry["name"] != FieldState {
+	if entry["name"] != FieldState || entry["$type"] != "StateIssueCustomField" {
 		t.Fatalf("posted field = %#v", entry)
+	}
+	if value, ok := entry["value"].(map[string]any); !ok || value["name"] != "In Progress" {
+		t.Fatalf("posted value = %#v", entry["value"])
 	}
 }
 
@@ -123,5 +126,38 @@ func TestClientRejectsMalformedIssueIDs(t *testing.T) {
 	}
 	if err := client.Comment(context.Background(), "CKM", "x"); err == nil {
 		t.Fatal("Comment() accepted a malformed issue id")
+	}
+}
+
+func TestUpdateFieldsSendsShapePerFieldKind(t *testing.T) {
+	var posted map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if err := json.Unmarshal(body, &posted); err != nil {
+			t.Errorf("decode body: %v", err)
+		}
+		io.WriteString(w, `{"id":"CKM-825"}`)
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "synthetic-token")
+	err := client.UpdateFields(context.Background(), "CKM-825", map[string]Value{
+		"AI Status": {Text: "Complete", Kind: KindState},
+		"AI Branch": {Text: "CKM-825", Kind: KindText},
+	})
+	if err != nil {
+		t.Fatalf("UpdateFields() error = %v", err)
+	}
+	if posted["$type"] != "Issue" {
+		t.Fatalf("payload type = %#v", posted["$type"])
+	}
+	entries := posted["customFields"].([]any)
+	shapes := map[string]string{}
+	for _, raw := range entries {
+		entry := raw.(map[string]any)
+		shapes[entry["name"].(string)] = entry["$type"].(string)
+	}
+	if shapes["AI Status"] != "StateIssueCustomField" || shapes["AI Branch"] != "SimpleIssueCustomField" {
+		t.Fatalf("field shapes = %#v", shapes)
 	}
 }

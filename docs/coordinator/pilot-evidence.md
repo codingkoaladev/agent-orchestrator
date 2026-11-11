@@ -101,5 +101,7 @@ and commit fields describe the coordinator implementation, not the fixture.
 - The Electron desktop has not been launched through WSLg yet.
 - No pre-live environment exists, so no pre-live transition has been attempted.
 - Per-session subscription switching inside one daemon is not implemented.
-- `AI Automation Enabled` and the four proposed review/pre-live fields are absent
-  or unwritten.
+- Reviewer bookkeeping fields (`AI Reviewer Model`, `AI Reviewer Effort`) cannot
+  be written until their bundles gain the required choices.
+- `AI Automation Enabled` is unwritten, and no pre-live transition has been
+  attempted because no pre-live environment exists.

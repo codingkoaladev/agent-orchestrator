@@ -17,6 +17,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -44,10 +45,36 @@ func NewClient(baseURL, token string) *Client {
 	}
 }
 
+// FieldKind is the write shape YouTrack expects for a custom field. The REST
+// API rejects a text value on a bundle field and vice versa.
+type FieldKind string
+
+const (
+	KindState FieldKind = "state"
+	KindEnum  FieldKind = "enum"
+	KindText  FieldKind = "text"
+	KindOther FieldKind = "other"
+)
+
+// fieldKind maps a project custom field type onto a write shape.
+func fieldKind(projectFieldType string) FieldKind {
+	switch {
+	case strings.Contains(projectFieldType, "StateProjectCustomField"):
+		return KindState
+	case strings.Contains(projectFieldType, "EnumProjectCustomField"):
+		return KindEnum
+	case strings.Contains(projectFieldType, "SimpleProjectCustomField"):
+		return KindText
+	default:
+		return KindOther
+	}
+}
+
 // Field is one custom field as YouTrack reported it.
 type Field struct {
 	Name   string
 	Value  string
+	Kind   FieldKind
 	Exists bool
 	// Allowed lists bundle values when the field is bundle-backed. An empty
 	// slice on a bundle field means "free text".
@@ -157,7 +184,7 @@ func redact(err error) error {
 	return fmt.Errorf("%s", message)
 }
 
-const issueFieldsQuery = "idReadable,customFields(name,value(name),projectCustomField(field(name),bundle(values(name))))"
+const issueFieldsQuery = "idReadable,customFields(name,value(name),projectCustomField(\"$type\",field(name),bundle(values(name))))"
 
 type issueResponse struct {
 	IDReadable   string `json:"idReadable"`
@@ -165,6 +192,7 @@ type issueResponse struct {
 		Name               string          `json:"name"`
 		Value              json.RawMessage `json:"value"`
 		ProjectCustomField struct {
+			Type   string `json:"$type"`
 			Bundle *struct {
 				Values []struct {
 					Name string `json:"name"`
@@ -198,14 +226,27 @@ func (c *Client) GetIssue(ctx context.Context, issueID string) (Issue, error) {
 				allowed = append(allowed, choice.Name)
 			}
 		}
-		issue.Fields[field.Name] = Field{Name: field.Name, Value: value, Exists: true, Allowed: allowed}
+		issue.Fields[field.Name] = Field{
+			Name:    field.Name,
+			Value:   value,
+			Kind:    fieldKind(field.ProjectCustomField.Type),
+			Exists:  true,
+			Allowed: allowed,
+		}
 	}
 	return issue, nil
 }
 
+// Value is one field write: the text to store and the shape YouTrack expects.
+type Value struct {
+	Text string
+	Kind FieldKind
+}
+
 // UpdateFields writes custom fields. Values must already be validated by the
-// workflow package; this method only transports them.
-func (c *Client) UpdateFields(ctx context.Context, issueID string, fields map[string]string) error {
+// workflow package; this method only transports them in the shape each field
+// type accepts.
+func (c *Client) UpdateFields(ctx context.Context, issueID string, fields map[string]Value) error {
 	if len(fields) == 0 {
 		return nil
 	}
@@ -214,14 +255,53 @@ func (c *Client) UpdateFields(ctx context.Context, issueID string, fields map[st
 	}
 	custom := make([]map[string]any, 0, len(fields))
 	for name, value := range fields {
-		custom = append(custom, map[string]any{
-			"name":  name,
-			"value": map[string]any{"name": value},
-		})
+		entry := map[string]any{"name": name}
+		switch value.Kind {
+		case KindState:
+			entry["$type"] = "StateIssueCustomField"
+			entry["value"] = map[string]any{"$type": "StateBundleElement", "name": value.Text}
+		case KindEnum:
+			entry["$type"] = "SingleEnumIssueCustomField"
+			entry["value"] = map[string]any{"$type": "EnumBundleElement", "name": value.Text}
+		case KindText:
+			entry["$type"] = "SimpleIssueCustomField"
+			entry["value"] = value.Text
+		default:
+			return fmt.Errorf("youtrack: field %q has an unsupported custom-field type", name)
+		}
+		custom = append(custom, entry)
 	}
-	body := map[string]any{"customFields": custom}
+	body := map[string]any{"$type": "Issue", "customFields": custom}
 	_, err := c.do(ctx, http.MethodPost, "/issues/"+url.PathEscape(issueID)+"?fields=id", body)
 	return err
+}
+
+// RecentComments returns the newest comment bodies, oldest first, bounded by
+// limit. Apply uses it to keep a retried transition from posting duplicate
+// evidence.
+func (c *Client) RecentComments(ctx context.Context, issueID string, limit int) ([]string, error) {
+	if !ValidIssueID(issueID) {
+		return nil, fmt.Errorf("youtrack: invalid issue id %q", issueID)
+	}
+	if limit <= 0 {
+		limit = 5
+	}
+	path := "/issues/" + url.PathEscape(issueID) + "/comments?fields=text&$top=" + strconv.Itoa(limit)
+	data, err := c.do(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	var comments []struct {
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(data, &comments); err != nil {
+		return nil, fmt.Errorf("youtrack: decode comments: %w", err)
+	}
+	bodies := make([]string, 0, len(comments))
+	for _, comment := range comments {
+		bodies = append(bodies, comment.Text)
+	}
+	return bodies, nil
 }
 
 // Comment appends one Markdown comment.

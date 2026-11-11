@@ -313,8 +313,9 @@ func resolveFieldValue(name, value string, allowed []string) (string, bool) {
 // the write-then-readback contract stays unit-testable.
 type API interface {
 	GetIssue(ctx context.Context, issueID string) (Issue, error)
-	UpdateFields(ctx context.Context, issueID string, fields map[string]string) error
+	UpdateFields(ctx context.Context, issueID string, fields map[string]Value) error
 	Comment(ctx context.Context, issueID, text string) error
+	RecentComments(ctx context.Context, issueID string, limit int) ([]string, error)
 }
 
 // Apply writes the transition, skipping fields the project does not define and
@@ -325,7 +326,7 @@ type API interface {
 // a bundle rejects are an error, never a silent skip. Every written field is
 // read back and compared.
 func Apply(ctx context.Context, api API, issue Issue, result Result) (skipped []string, err error) {
-	write := map[string]string{}
+	write := map[string]Value{}
 	for name, value := range result.Fields {
 		field, ok := issue.Fields[name]
 		if !ok || !field.Exists {
@@ -336,11 +337,27 @@ func Apply(ctx context.Context, api API, issue Issue, result Result) (skipped []
 		if !ok {
 			return skipped, fmt.Errorf("field %q does not allow value %q; allowed: %s", name, value, strings.Join(field.Allowed, ", "))
 		}
-		write[name] = resolved
+		if field.Kind == KindOther {
+			return skipped, fmt.Errorf("field %q has a custom-field type this bridge cannot write", name)
+		}
+		write[name] = Value{Text: resolved, Kind: field.Kind}
 	}
 	if result.Comment != "" {
-		if err := api.Comment(ctx, issue.ID, result.Comment); err != nil {
-			return skipped, err
+		// A retried transition must not stack identical evidence comments. If the
+		// newest comment already carries this body, the comment half is done.
+		duplicate := false
+		if recent, err := api.RecentComments(ctx, issue.ID, 3); err == nil {
+			for _, body := range recent {
+				if strings.TrimSpace(body) == strings.TrimSpace(result.Comment) {
+					duplicate = true
+					break
+				}
+			}
+		}
+		if !duplicate {
+			if err := api.Comment(ctx, issue.ID, result.Comment); err != nil {
+				return skipped, err
+			}
 		}
 	}
 	if len(write) == 0 {
@@ -354,8 +371,8 @@ func Apply(ctx context.Context, api API, issue Issue, result Result) (skipped []
 		return skipped, fmt.Errorf("read back %s: %w", issue.ID, err)
 	}
 	for name, want := range write {
-		if got := readback.Fields[name].Value; got != want {
-			return skipped, fmt.Errorf("readback mismatch for %q: wrote %q, ticket shows %q", name, want, got)
+		if got := readback.Fields[name].Value; got != want.Text {
+			return skipped, fmt.Errorf("readback mismatch for %q: wrote %q, ticket shows %q", name, want.Text, got)
 		}
 	}
 	return skipped, nil

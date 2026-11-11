@@ -185,7 +185,8 @@ func TestValidatePreliveRequiresReviewedCommitAndEvidence(t *testing.T) {
 
 type fakeAPI struct {
 	issue       Issue
-	written     map[string]string
+	recent      []string
+	written     map[string]Value
 	commented   string
 	readbacks   int
 	failComment bool
@@ -199,20 +200,24 @@ func (f *fakeAPI) GetIssue(context.Context, string) (Issue, error) {
 	}
 	for name, value := range f.written {
 		field := issue.Fields[name]
-		field.Value = value
+		field.Value = value.Text
 		issue.Fields[name] = field
 	}
 	return issue, nil
 }
 
-func (f *fakeAPI) UpdateFields(_ context.Context, _ string, fields map[string]string) error {
+func (f *fakeAPI) UpdateFields(_ context.Context, _ string, fields map[string]Value) error {
 	if f.written == nil {
-		f.written = map[string]string{}
+		f.written = map[string]Value{}
 	}
 	for name, value := range fields {
 		f.written[name] = value
 	}
 	return nil
+}
+
+func (f *fakeAPI) RecentComments(context.Context, string, int) ([]string, error) {
+	return f.recent, nil
 }
 
 func (f *fakeAPI) Comment(_ context.Context, _, text string) error {
@@ -252,13 +257,13 @@ func TestApplySkipsUndefinedFieldsAndVerifiesReadback(t *testing.T) {
 	if api.commented == "" {
 		t.Fatal("Apply() wrote no evidence comment")
 	}
-	if api.written[FieldState] != StateInProgress {
+	if api.written[FieldState].Text != StateInProgress {
 		t.Fatalf("Apply() wrote %#v", api.written)
 	}
 	// The ticket bundle stores bare model ids while the agent needs the
 	// provider-qualified one, so Apply must land the bare choice.
-	if api.written[FieldCoderModel] != "deepseek-v4.1-flash" {
-		t.Fatalf("coder model written as %q, want the bundle choice", api.written[FieldCoderModel])
+	if got := api.written[FieldCoderModel].Text; got != "deepseek-v4.1-flash" {
+		t.Fatalf("coder model written as %q, want the bundle choice", got)
 	}
 }
 
@@ -323,5 +328,49 @@ func TestApplyCommentFailureStopsFieldWrites(t *testing.T) {
 	}
 	if len(api.written) != 0 {
 		t.Fatalf("Apply() wrote fields despite a failed comment: %#v", api.written)
+	}
+}
+
+func TestApplyDoesNotRepeatIdenticalEvidenceComments(t *testing.T) {
+	api := &fakeAPI{issue: Issue{ID: "CKM-825", Fields: map[string]Field{
+		FieldState: {Name: FieldState, Exists: true, Kind: KindState},
+	}}}
+	result, err := Validate(StageStart, baseFacts())
+	if err != nil {
+		t.Fatal(err)
+	}
+	api.recent = []string{"older note", result.Comment}
+	if _, err := Apply(context.Background(), api, api.issue, result); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	if api.commented != "" {
+		t.Fatal("Apply() repeated an identical evidence comment")
+	}
+}
+
+func TestFieldKindMapsProjectFieldTypes(t *testing.T) {
+	cases := map[string]FieldKind{
+		"StateProjectCustomField":  KindState,
+		"EnumProjectCustomField":   KindEnum,
+		"SimpleProjectCustomField": KindText,
+		"UserProjectCustomField":   KindOther,
+	}
+	for projectType, want := range cases {
+		if got := fieldKind(projectType); got != want {
+			t.Fatalf("fieldKind(%q) = %q, want %q", projectType, got, want)
+		}
+	}
+}
+
+func TestApplyRefusesUnsupportedFieldKind(t *testing.T) {
+	api := &fakeAPI{issue: Issue{ID: "CKM-825", Fields: map[string]Field{
+		FieldState: {Name: FieldState, Exists: true, Kind: KindOther},
+	}}}
+	result, err := Validate(StageStart, baseFacts())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Apply(context.Background(), api, api.issue, result); err == nil {
+		t.Fatal("Apply() wrote an unsupported custom-field type")
 	}
 }

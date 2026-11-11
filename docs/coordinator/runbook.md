@@ -187,9 +187,19 @@ stale key is an owner follow-up.
 | `review` | reviewed commit differs from the submitted one; reviewer session equals the coding session (self-review); reviewer model equals the coder model |
 | `prelive` | no reviewed commit; reviewed commit differs from the pre-live commit; no evidence text |
 
-`Apply` writes the comment first, skips fields the project does not define and
-reports them, refuses a value a bundle does not offer, and reads every written
-field back.
+`Apply` writes the comment first (skipping an identical one already at the top of
+the ticket, so a retry does not stack evidence), skips fields the project does
+not define and reports them, refuses a value a bundle does not offer, and reads
+every written field back.
+
+YouTrack needs a different payload shape per custom-field type, and rejects a
+value of the wrong shape with `$type is required`:
+
+| Project field type | Issue field type | Value |
+| --- | --- | --- |
+| `StateProjectCustomField` | `StateIssueCustomField` | `{"$type":"StateBundleElement","name":"…"}` |
+| `EnumProjectCustomField` | `SingleEnumIssueCustomField` | `{"$type":"EnumBundleElement","name":"…"}` |
+| `SimpleProjectCustomField` | `SimpleIssueCustomField` | plain string |
 
 ### State mapping
 
@@ -202,8 +212,8 @@ field back.
 | prelive verified | For Release | Complete |
 
 `Done` is never set by the bridge. CKM has no `Ready for Go Live` value, so a
-verified pre-live handoff maps to `For Release` + `Complete`; confirm that
-mapping with the owner before relying on it.
+verified pre-live handoff maps to `For Release` + `Complete`. The owner confirmed
+this mapping for both workflow tickets.
 
 Known id-space caveat: `AI Coding Session ID` holds the OpenCode session id,
 while the daemon reports Orchestrator session ids (`pilot-2`). Duplicate-dispatch
@@ -211,16 +221,30 @@ detection compares against the daemon, so it only fires when the ticket records
 an Orchestrator session id. Record both ids in the evidence comment while the
 field holds the OpenCode one.
 
+## Ticket fields
+
+The four proposed fields now exist on CKM and are written only from observed
+evidence: `AI Reviewer Effort`, `AI Review Session ID`, `AI Last Reviewed Commit`,
+`AI Pre-live Verified Commit`. The owner confirmed during this session that a
+proven pre-live acceptance maps to State `For Release` + AI Status `Complete`.
+
+Field gaps that still block reviewer bookkeeping:
+
+- `AI Reviewer Model`, `AI Reviewer Effort` and `AI Automation Enabled` are
+  bundle-backed but their bundles are **empty**. A live write of
+  `gpt-6.1-sol` and `low` was rejected as "not in the field choices", so the
+  bridge cannot record reviewer identity yet. Add the choices in the project
+  settings; the bridge does not substitute another reviewer.
+- There is no `Ready for Go Live` state and no `Test Failed` state. The mapping
+  above is the agreed replacement.
+- `AI Automation Enabled` is not written by the bridge.
+
 ## Pending owner work
 
-- Create the proposed fields: `AI Reviewer Effort`, `AI Review Session ID`,
-  `AI Last Reviewed Commit`, `AI Pre-live Verified Commit`. Until then the bridge
-  reports them as skipped.
-- Add `gpt-6.1-sol` to the reviewer choices for both projects if the field stays
-  bundle-backed; live REST currently reports `AI Reviewer Model` as free text.
-- Decide whether `AI Automation Enabled` is a real gate and which values are
-  valid; the bridge does not write it.
-- Repair or retire the `YOUTRACK_AUTH_TOKEN` entry.
+- Add reviewer choices (`gpt-6.1-sol`) and the `low` effort value to the CKM and
+  CKA project field bundles.
+- Repair or retire the `YOUTRACK_AUTH_TOKEN` entry; `YOUTRACK_TOKEN` is the one
+  that authenticates today.
 - Provide the pre-live environment and its evidence procedure; no pre-live claim
   can be made today.
 - Launch and verify the Electron desktop through WSLg once, then decide whether

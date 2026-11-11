@@ -12,8 +12,8 @@ upstream distribution guide; see the repository `README.md` for that.
 | Item | Value |
 | --- | --- |
 | Host | Existing WSL2 Ubuntu 22.04 distribution, WSLg display |
-| Interface | Desktop app from this checkout (Electron, WSLg); currently blocked on the host C++ toolchain, daemon path in use |
-| Daemon | Native `ao daemon`, loopback only (`127.0.0.1:3001` and `[::1]:3001`) |
+| Interface | Desktop app through WSLg. Verified running on this host from the installed release AppImage (`~/.ao/agent-orchestrator.AppImage`, window `Orchestrator.inc` 1320x860). Building this checkout's own desktop is blocked on the host C++ toolchain. |
+| Daemon | `ao daemon` on loopback only (`127.0.0.1:3001`, `[::1]:3001`), started either by the desktop app or by the systemd user unit — never both |
 | Source | `/home/pawel/projects/koala-orchestrator` |
 | State | `~/.ao` (`~/.ao/data`, `~/.ao/data/worktrees`, `~/.ao/running.json`) |
 | Network | No public endpoint, no Cloud Agents |
@@ -58,6 +58,19 @@ systemctl --user stop ao-daemon      # stop
 The unit is **not** enabled at login during the pilot. To change that, run
 `systemctl --user enable ao-daemon`. While the PC or WSL is stopped, no work
 runs.
+
+Only one process can own port 3001. When the desktop app starts, its managed
+daemon takes the port and stops the systemd one; observed on this host. Pick one
+interface for a session and stop the other first:
+
+```bash
+systemctl --user stop ao-daemon          # before launching the desktop app
+# or, before using the systemd unit:
+# quit the desktop app, then start ao-daemon
+```
+
+Both satisfy the agreed arrangement (desktop through WSLg, daemon on loopback);
+the difference is who supervises the daemon.
 
 Verify a healthy install:
 
@@ -298,9 +311,10 @@ Field gaps that still block reviewer bookkeeping:
   that authenticates today.
 - Provide the pre-live environment and its evidence procedure; no pre-live claim
   can be made today.
-- Install a newer C++ toolchain to build the desktop: Electron 44's headers fail
-  against g++ 11.4 (`g++-12` is available from apt, 12.3.0, and needs a
-  privileged install). Until then the daemon path is the verified interface.
+- Install a newer C++ toolchain to build this checkout's desktop: Electron 44's
+  headers fail against g++ 11.4 (`g++-12` is available from apt, 12.3.0, and
+  needs a privileged install). The installed release AppImage already runs
+  through WSLg, so this blocks a fork build, not the agreed interface.
 - Decide whether the pilot keeps using the systemd unit or the desktop-managed
   daemon once the desktop builds.
 

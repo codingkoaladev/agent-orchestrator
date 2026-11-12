@@ -81,9 +81,11 @@ type Field struct {
 	Allowed []string
 }
 
-// fieldValue reads a custom field value that YouTrack returns as either an
-// object ({"name": ...}) for bounded fields or a bare string for text fields.
-func fieldValue(raw json.RawMessage) string {
+// fieldValue reads a custom field value that YouTrack returns as an object
+// ({"name": ...}) for bounded fields, a bare string for text fields, or a
+// millisecond epoch for date-time fields. presentation is preferred for dates
+// because it is already in the project user's timezone.
+func fieldValue(raw json.RawMessage, presentation string) string {
 	trimmed := strings.TrimSpace(string(raw))
 	if trimmed == "" || trimmed == "null" {
 		return ""
@@ -91,20 +93,30 @@ func fieldValue(raw json.RawMessage) string {
 	var object struct {
 		Name string `json:"name"`
 	}
-	if err := json.Unmarshal(raw, &object); err == nil {
+	if err := json.Unmarshal(raw, &object); err == nil && object.Name != "" {
 		return object.Name
 	}
 	var text string
 	if err := json.Unmarshal(raw, &text); err == nil {
 		return text
 	}
+	var millis float64
+	if err := json.Unmarshal(raw, &millis); err == nil && millis > 0 {
+		// Use the exact instant, not a locale-formatted presentation string.
+		return time.UnixMilli(int64(millis)).UTC().Format(time.RFC3339)
+	}
+	if strings.TrimSpace(presentation) != "" {
+		return presentation
+	}
 	return ""
 }
 
 // Issue is the subset of a ticket this bridge reads and writes.
 type Issue struct {
-	ID     string
-	Fields map[string]Field
+	ID          string
+	Summary     string
+	Description string
+	Fields      map[string]Field
 }
 
 // ErrUnauthorized reports a rejected credential without echoing it.
@@ -184,13 +196,16 @@ func redact(err error) error {
 	return fmt.Errorf("%s", message)
 }
 
-const issueFieldsQuery = "idReadable,customFields(name,value(name),projectCustomField(\"$type\",field(name),bundle(values(name))))"
+const issueFieldsQuery = "idReadable,summary,description,customFields(name,$type,value,presentation,projectCustomField(\"$type\",field(name),bundle(values(name))))"
 
 type issueResponse struct {
 	IDReadable   string `json:"idReadable"`
+	Summary      string `json:"summary"`
+	Description  string `json:"description"`
 	CustomFields []struct {
 		Name               string          `json:"name"`
 		Value              json.RawMessage `json:"value"`
+		Presentation       string          `json:"presentation"`
 		ProjectCustomField struct {
 			Type   string `json:"$type"`
 			Bundle *struct {
@@ -216,9 +231,9 @@ func (c *Client) GetIssue(ctx context.Context, issueID string) (Issue, error) {
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		return Issue{}, fmt.Errorf("youtrack: decode issue: %w", err)
 	}
-	issue := Issue{ID: decoded.IDReadable, Fields: map[string]Field{}}
+	issue := Issue{ID: decoded.IDReadable, Summary: decoded.Summary, Description: decoded.Description, Fields: map[string]Field{}}
 	for _, field := range decoded.CustomFields {
-		value := fieldValue(field.Value)
+		value := fieldValue(field.Value, field.Presentation)
 		var allowed []string
 		if field.ProjectCustomField.Bundle != nil {
 			allowed = make([]string, 0, len(field.ProjectCustomField.Bundle.Values))

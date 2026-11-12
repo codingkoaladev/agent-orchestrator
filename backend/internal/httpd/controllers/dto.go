@@ -516,6 +516,13 @@ type WorkspaceTreeEntry struct {
 type SessionView struct {
 	// AgentSessionID is the native harness identity, distinct from the daemon session ID.
 	AgentSessionID string `json:"agentSessionId,omitempty"`
+	// ProviderConversationID is the harness-tagged chat identity a Chat driver
+	// needs to resume this session's provider conversation. It is deliberately
+	// separate from AgentSessionID: most harnesses do not prove those protocol
+	// identities interchangeable, so a client must only use it after verifying
+	// the harness tag. This is projection only; the daemon never exposes the
+	// underlying credential or provider transcript.
+	ProviderConversationID string `json:"providerConversationId,omitempty"`
 	domain.Session
 	Branch string `json:"branch,omitempty"`
 	// TerminalGeneration is an opaque renderer fence. A restarted controller

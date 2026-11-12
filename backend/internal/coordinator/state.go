@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -85,17 +86,30 @@ type Prelive struct {
 
 // Run is the durable record for one ticket.
 type Run struct {
-	Issue           string            `json:"issue"`
-	Project         string            `json:"project"`
-	Phase           Phase             `json:"phase"`
-	Coder           Session           `json:"coder"`
-	SubmittedCommit string            `json:"submittedCommit,omitempty"`
-	Reviews         []Review          `json:"reviews,omitempty"`
-	PreliveCheck    *Prelive          `json:"prelive,omitempty"`
-	ReviewRounds    int               `json:"reviewRounds"`
-	Note            string            `json:"note,omitempty"`
-	UpdatedAt       time.Time         `json:"updatedAt"`
-	Extra           map[string]string `json:"extra,omitempty"`
+	Issue           string   `json:"issue"`
+	Project         string   `json:"project"`
+	Phase           Phase    `json:"phase"`
+	Coder           Session  `json:"coder"`
+	SubmittedCommit string   `json:"submittedCommit,omitempty"`
+	Reviews         []Review `json:"reviews,omitempty"`
+	PreliveCheck    *Prelive `json:"prelive,omitempty"`
+	ReviewRounds    int      `json:"reviewRounds"`
+	// Approved records the owner's dispatch authorization so a restart can
+	// resume the same run without a second approval prompt.
+	Approved bool `json:"approved"`
+	// ReviewInFlight names the commit whose reviewer process may have run. It is
+	// persisted before the reviewer starts and cleared only after a verdict is
+	// recorded, so a crash cannot authorise a duplicate review.
+	ReviewInFlight string `json:"reviewInFlight,omitempty"`
+	// CorrectionSentFor is the commit whose findings were delivered to the
+	// coder. It makes correction delivery restart-safe and idempotent.
+	CorrectionSentFor string `json:"correctionSentFor,omitempty"`
+	// LastReviewRequestAt is the ticket's Review Requested At value that the
+	// scheduler last acted on, kept for audit and duplicate-request reporting.
+	LastReviewRequestAt string            `json:"lastReviewRequestAt,omitempty"`
+	Note                string            `json:"note,omitempty"`
+	UpdatedAt           time.Time         `json:"updatedAt"`
+	Extra               map[string]string `json:"extra,omitempty"`
 }
 
 // LatestReview returns the newest verdict recorded for commit.
@@ -146,7 +160,13 @@ func (p Prelive) Evidence() youtrack.PreliveEvidence {
 // ErrNoRun reports that a ticket has no recorded run.
 var ErrNoRun = errors.New("coordinator: no recorded run for this ticket")
 
-var issueFilePattern = regexp.MustCompile(`^[A-Z][A-Z0-9_]*-[0-9]+$`)
+// errRunLocked reports that another live process owns the ticket run.
+var errRunLocked = errors.New("coordinator: run lock is held by another supervisor")
+
+var (
+	issueFilePattern = regexp.MustCompile(`^[A-Z][A-Z0-9_]*-[0-9]+$`)
+	commitPattern    = regexp.MustCompile(`^[0-9a-f]{40}$`)
+)
 
 // Store persists runs as one JSON file per ticket under Dir.
 type Store struct {
@@ -183,6 +203,42 @@ func (s Store) Load(issue string) (Run, error) {
 		return Run{}, fmt.Errorf("coordinator: decode run: %w", err)
 	}
 	return run, nil
+}
+
+// List returns every durable run record. It is the scheduler's explicit
+// authorization set: only tickets an owner dispatched with `--approved` have a
+// run. Lock and temporary files are ignored.
+func (s Store) List(ctx context.Context) ([]Run, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(s.Dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("coordinator: list runs: %w", err)
+	}
+	runs := make([]Run, 0, len(entries))
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".json") || strings.HasPrefix(name, ".") {
+			continue
+		}
+		issue := strings.TrimSuffix(name, ".json")
+		if !issueFilePattern.MatchString(issue) {
+			continue
+		}
+		run, err := s.Load(issue)
+		if err != nil {
+			return nil, err
+		}
+		runs = append(runs, run)
+	}
+	return runs, nil
 }
 
 // Save writes a run atomically with owner-only permissions.
@@ -222,6 +278,12 @@ func (s Store) Save(run Run) error {
 	if err := os.Rename(name, s.Path(run.Issue)); err != nil {
 		return fmt.Errorf("coordinator: activate run: %w", err)
 	}
+	// Persist the directory entry too: a crash immediately after rename must not
+	// resurrect the previous phase on restart.
+	if dir, err := os.Open(s.Dir); err == nil {
+		_ = dir.Sync()
+		_ = dir.Close()
+	}
 	return nil
 }
 
@@ -232,6 +294,78 @@ func (r *Run) AddReview(review Review) {
 		return existing.Commit == review.Commit
 	})
 	r.Reviews = append(r.Reviews, review)
+}
+
+// RunLock is a held, exclusive owner lock for one ticket run.
+type RunLock struct {
+	file *os.File
+}
+
+// Lock takes the exclusive supervisor lock for issue without waiting. The lock
+// is bound to an open file descriptor, so the kernel releases it when the
+// process exits, including a crash or SIGKILL; a stale lock file is harmless.
+// Only one process may own a ticket's lifecycle at a time.
+func (s Store) Lock(ctx context.Context, issue string) (*RunLock, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if !issueFilePattern.MatchString(strings.ToUpper(strings.TrimSpace(issue))) {
+		return nil, fmt.Errorf("coordinator: invalid issue id %q", issue)
+	}
+	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
+		return nil, fmt.Errorf("coordinator: create run dir: %w", err)
+	}
+	path := s.Path(issue) + ".lock"
+	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("coordinator: open run lock: %w", err)
+	}
+	if err := tryRunLock(file); err != nil {
+		holder := readRunLockPID(file)
+		_ = file.Close()
+		if errors.Is(err, errRunLocked) {
+			if holder > 0 {
+				return nil, fmt.Errorf("%w: %s (pid %d)", ErrAlreadyRunning, strings.ToUpper(strings.TrimSpace(issue)), holder)
+			}
+			return nil, fmt.Errorf("%w: %s", ErrAlreadyRunning, strings.ToUpper(strings.TrimSpace(issue)))
+		}
+		return nil, fmt.Errorf("coordinator: lock run: %w", err)
+	}
+	_ = file.Truncate(0)
+	_, _ = file.WriteAt([]byte(fmt.Sprintf("%d\n", os.Getpid())), 0)
+	return &RunLock{file: file}, nil
+}
+
+// Release frees the ticket lock. It is safe on a nil lock.
+func (l *RunLock) Release() error {
+	if l == nil || l.file == nil {
+		return nil
+	}
+	unlockErr := unlockRunLock(l.file)
+	closeErr := l.file.Close()
+	l.file = nil
+	if unlockErr != nil {
+		return fmt.Errorf("coordinator: unlock run: %w", unlockErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("coordinator: close run lock: %w", closeErr)
+	}
+	return nil
+}
+
+// readRunLockPID best-effort reads the holder PID. The lock itself lives in the
+// kernel; this text is diagnostics only.
+func readRunLockPID(file *os.File) int {
+	buf := make([]byte, 32)
+	n, err := file.ReadAt(buf, 0)
+	if n == 0 && err != nil {
+		return 0
+	}
+	pid, convErr := strconv.Atoi(strings.TrimSpace(string(buf[:n])))
+	if convErr != nil {
+		return 0
+	}
+	return pid
 }
 
 // Claim reserves a ticket before any external dispatch. The exclusive durable

@@ -26,6 +26,10 @@ const (
 	FieldReviewSession   = "AI Review Session ID"
 	FieldLastReviewed    = "AI Last Reviewed Commit"
 	FieldPreliveVerified = "AI Pre-live Verified Commit"
+	// FieldReviewRequestedAt is set by the project's YouTrack workflow when a
+	// ticket enters Awaiting AI Review. The scheduler uses this request time,
+	// never the issue's general updated time.
+	FieldReviewRequestedAt = "Review Requested At"
 )
 
 // Ticket states this bridge may set. They mirror the live CKM schema; a state
@@ -80,6 +84,9 @@ type TicketFacts struct {
 	VerifiedCommit     string
 	RecordedSessionID  string
 	CoderModel         string
+	Branch             string
+	WorktreePath       string
+	ReviewRequestedAt  string
 }
 
 // ReviewEvidence is a verdict recorded by the coordinator after it actually ran
@@ -183,6 +190,9 @@ func validateStart(facts Facts) (Result, error) {
 	if !facts.LivenessKnown {
 		return Result{}, errors.New("session liveness is unknown; refusing to dispatch until the daemon answers")
 	}
+	if facts.Ticket.AIStatus == AIStatusAwaiting {
+		return Result{}, errors.New("ticket is already awaiting AI review; adopt the recorded worker instead of resetting its review status")
+	}
 	if err := checkDuplicateDispatch(facts); err != nil {
 		return Result{}, err
 	}
@@ -196,7 +206,7 @@ func validateStart(facts Facts) (Result, error) {
 	}
 	comment := fmt.Sprintf("Implementation started.\n\n- Orchestrator session: `%s`\n- Native session: `%s`\n- Branch: `%s`\n- Worktree: `%s`\n- Coder model: `%s`",
 		facts.OrchestratorSessionID, facts.CoderSessionID, facts.Branch, facts.WorktreePath, facts.CoderModel)
-	return Result{Stage: StageStart, Fields: fields, Comment: comment}, nil
+	return Result{Stage: StageStart, Fields: fields, Comment: comment, ExpectSubmitted: facts.Ticket.SubmittedCommit}, nil
 }
 
 func validateSubmit(facts Facts) (Result, error) {
@@ -513,4 +523,37 @@ func commentAlreadyPresent(ctx context.Context, api API, issueID, body string) b
 		}
 	}
 	return false
+}
+
+// RequiredEvidenceFields lists the ticket fields a stage must actually write for
+// its claim to be true. A project schema that omits one of them cannot support
+// the transition: skipping it silently would let the coordinator report a review
+// or acceptance the ticket never recorded.
+func RequiredEvidenceFields(stage Stage) []string {
+	switch stage {
+	case StageStart:
+		return []string{FieldState, FieldAIStatus, FieldCoderModel, FieldBranch, FieldWorktreePath, FieldCodingSession}
+	case StageSubmit:
+		return []string{FieldState, FieldAIStatus, FieldLastSubmitted, FieldBranch, FieldWorktreePath, FieldCodingSession}
+	case StageReview:
+		return []string{FieldState, FieldAIStatus, FieldReviewerModel, FieldReviewerEffort, FieldReviewSession, FieldLastReviewed}
+	case StagePrelive:
+		return []string{FieldState, FieldAIStatus, FieldPreliveVerified}
+	}
+	return nil
+}
+
+// MissingEvidenceFields reports which required fields a transition skipped.
+func MissingEvidenceFields(stage Stage, skipped []string) []string {
+	required := RequiredEvidenceFields(stage)
+	if len(required) == 0 || len(skipped) == 0 {
+		return nil
+	}
+	missing := make([]string, 0, len(required))
+	for _, name := range required {
+		if slices.Contains(skipped, name) {
+			missing = append(missing, name)
+		}
+	}
+	return missing
 }

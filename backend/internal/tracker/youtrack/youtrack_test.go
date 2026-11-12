@@ -119,6 +119,32 @@ func TestUnauthorizedErrorDoesNotEchoTheToken(t *testing.T) {
 	}
 }
 
+func TestGetIssueReadsDateTimeFieldValue(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		value        string
+		presentation string
+		want         string
+	}{
+		{"epoch", `1794484800000`, `2026-11-12 12:00:00`, `2026-11-12T12:00:00Z`},
+		{"presentation string", `"2026-11-12 12:00:00"`, ``, `2026-11-12 12:00:00`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				io.WriteString(w, `{"idReadable":"CKM-1","customFields":[{"name":"Review Requested At","$type":"SimpleIssueCustomField","value":`+tc.value+`,"presentation":"`+tc.presentation+`"}]}`)
+			}))
+			defer server.Close()
+			issue, err := NewClient(server.URL, "synthetic-token").GetIssue(context.Background(), "CKM-1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := issue.Fields["Review Requested At"].Value; got != tc.want {
+				t.Fatalf("date value = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestClientRejectsMalformedIssueIDs(t *testing.T) {
 	client := NewClient("http://127.0.0.1:1", "synthetic-token")
 	if _, err := client.GetIssue(context.Background(), "not-an-issue"); err == nil {

@@ -1,10 +1,12 @@
 // Command ao-coordinator runs one ticket through the local lifecycle:
-// dispatch the coder, wait for a submitted commit without burning model turns,
-// run the independent reviewer on that exact commit, return findings to the same
-// coder, re-review, and gate release readiness on recorded pre-live evidence.
+// dispatch the coder, wait for a real ticket submission without burning model
+// turns, run the independent reviewer on that exact commit, return findings to
+// the same coder over its chat, re-review, and gate release readiness on
+// recorded pre-live evidence.
 //
-// State lives in the coordinator run store, so a restart resumes instead of
-// dispatching a second worker. Liveness always comes from the daemon; when the
+// The run record and its exclusive lock live in the coordinator store, so a
+// restart resumes instead of dispatching a second worker or repeating a review
+// that may already have started. Liveness always comes from the daemon; when the
 // daemon cannot answer, the command fails instead of guessing.
 package main
 
@@ -49,14 +51,22 @@ func run(args []string) error {
 		runDir         = fs.String("run-dir", defaultRunDir(), "run-state directory")
 		aoDataDir      = fs.String("ao-data-dir", defaultDataDir(), "Orchestrator data directory")
 		runFile        = fs.String("ao-run-file", defaultRunFile(), "Orchestrator run file")
-		base           = fs.String("base", "", "base commit the submission must advance from")
-		wait           = fs.Duration("wait", 30*time.Minute, "how long to wait for a submission")
-		poll           = fs.Duration("poll", 10*time.Second, "how often to poll the checkout")
+		wait           = fs.Duration("wait", 0, "how long to wait for one verified submission (0 means no limit)")
+		poll           = fs.Duration("poll", 10*time.Second, "how often to poll the ticket and checkout")
+		confirm        = fs.Duration("confirm", time.Minute, "how long one submission may fail worktree/PR checks before blocking")
+		identityWait   = fs.Duration("identity-wait", 30*time.Second, "how long to wait for a native chat identity after spawn")
 		rounds         = fs.Int("rounds", 3, "maximum review rounds")
 		reviewerBin    = fs.String("reviewer-bin", "codex", "independent reviewer executable")
 		reviewerModel  = fs.String("reviewer-model", "gpt-6.1-sol", "independent reviewer model")
 		reviewerEffort = fs.String("reviewer-effort", "low", "independent reviewer effort")
 		preliveCommand = fs.String("prelive-command", "", "pre-live check command (required to claim acceptance)")
+		noWatch        = fs.Bool("no-watch", false, "dispatch or adopt the coder, then exit without supervising")
+		timeout        = fs.Duration("timeout", 0, "overall command timeout (0 means no limit)")
+		interval       = fs.Duration("interval", 5*time.Minute, "scheduled review polling interval (minimum one minute)")
+		window         = fs.Duration("review-window", 72*time.Hour, "oldest Review Requested At value the scheduler may act on")
+		ticketTimeout  = fs.Duration("ticket-timeout", time.Hour, "maximum time one scheduled review may take")
+		ticketTimezone = fs.String("ticket-timezone", "", "IANA timezone for YouTrack date-time fields (default local)")
+		once           = fs.Bool("once", false, "run one scheduled-review sweep and exit")
 		baseURL        = fs.String("base-url", "", "YouTrack REST base URL")
 		tokenEnv       = fs.String("token-env", "YOUTRACK_TOKEN", "environment variable holding the YouTrack token")
 		jsonOut        = fs.Bool("json", false, "print the run record as JSON")
@@ -64,11 +74,15 @@ func run(args []string) error {
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
-	if *issue == "" {
+	if command != "schedule" && *issue == "" {
 		return errors.New("--issue is required")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Hour)
-	defer cancel()
+	ctx := context.Background()
+	if *timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, *timeout)
+		defer cancel()
+	}
 
 	store := coordinator.Store{Dir: *runDir}
 	if command == "status" {
@@ -84,15 +98,21 @@ func run(args []string) error {
 		return err
 	}
 	service := &coordinator.Service{
-		Tickets:       &ticketAdapter{client: youtrack.NewClient(*baseURL, os.Getenv(*tokenEnv))},
-		Sessions:      daemon,
-		Reviewer:      coordinator.CodexReviewer{Binary: *reviewerBin, Model: *reviewerModel, Effort: *reviewerEffort},
-		Detector:      coordinator.GitDetector{},
-		PreliveRunner: coordinator.CommandPrelive{},
-		Store:         store,
-		PollEvery:     *poll,
-		WaitFor:       *wait,
-		MaxRounds:     *rounds,
+		Tickets:        &ticketAdapter{client: youtrack.NewClient(*baseURL, os.Getenv(*tokenEnv))},
+		Sessions:       daemon,
+		Reviewer:       coordinator.CodexReviewer{Binary: *reviewerBin, Snapshot: coordinator.GitSnapshot{}},
+		Checkout:       coordinator.GitCheckout{},
+		PullRequests:   coordinator.GHPullRequests{},
+		PreliveRunner:  coordinator.CommandPrelive{},
+		Store:          store,
+		PollEvery:      *poll,
+		WaitFor:        *wait,
+		ConfirmFor:     *confirm,
+		IdentityWait:   *identityWait,
+		MaxRounds:      *rounds,
+		PreliveCommand: *preliveCommand,
+		ReviewerModel:  *reviewerModel,
+		ReviewerEffort: *reviewerEffort,
 		Log: func(event string, fields map[string]string) {
 			fmt.Fprintf(os.Stderr, "event=%s %v\n", event, fields)
 		},
@@ -100,21 +120,23 @@ func run(args []string) error {
 
 	switch command {
 	case "start":
-		run, err := service.Start(ctx, coordinator.StartRequest{
+		request := coordinator.StartRequest{
 			Issue: *issue, Project: *project, Branch: *branch, Model: *model,
 			Effort: *effort, Subscription: *subscription, Prompt: *prompt, Approved: *approved,
-		})
+		}
+		var run coordinator.Run
+		if *noWatch {
+			run, err = service.Start(ctx, request)
+		} else {
+			run, err = service.StartAndFollow(ctx, request)
+		}
 		if err != nil && !errors.Is(err, coordinator.ErrAlreadyRunning) {
+			_ = printRun(run, *jsonOut)
 			return err
 		}
 		return printRun(run, *jsonOut)
 	case "review":
-		if *base != "" {
-			if _, err := service.AwaitSubmission(ctx, *issue, *base); err != nil {
-				return err
-			}
-		}
-		run, err := service.Review(ctx, *issue)
+		run, err := service.Supervise(ctx, *issue)
 		if err != nil {
 			_ = printRun(run, *jsonOut)
 			return err
@@ -127,10 +149,60 @@ func run(args []string) error {
 			return err
 		}
 		return printRun(run, *jsonOut)
+	case "schedule":
+		location := time.Local
+		if strings.TrimSpace(*ticketTimezone) != "" {
+			location, err = time.LoadLocation(*ticketTimezone)
+			if err != nil {
+				return fmt.Errorf("load ticket timezone: %w", err)
+			}
+		}
+		scheduler := &coordinator.Scheduler{
+			Service:       service,
+			Interval:      *interval,
+			Window:        *window,
+			TicketTimeout: *ticketTimeout,
+			Location:      location,
+			Log: func(event string, fields map[string]string) {
+				fmt.Fprintf(os.Stderr, "event=%s %v\n", event, fields)
+			},
+		}
+		if *once {
+			report := scheduler.Sweep(ctx)
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			return printSweep(report, *jsonOut)
+		}
+		return scheduler.Run(ctx)
 	default:
 		usage()
 		return fmt.Errorf("unknown command %q", command)
 	}
+}
+
+func printSweep(report coordinator.SweepReport, asJSON bool) error {
+	if asJSON {
+		data, _ := json.MarshalIndent(report, "", "  ")
+		fmt.Println(string(data))
+		return nil
+	}
+	fmt.Printf("scanned: %d\neligible: %d\nreviewed: %d\nskipped: %d\nfailed: %d\n",
+		report.Scanned, report.Eligible, report.Reviewed, report.Skipped, report.Failed)
+	for _, result := range report.Results {
+		fmt.Printf("- %s: %s", result.Issue, result.Status)
+		if result.Commit != "" {
+			fmt.Printf(" commit=%s", result.Commit)
+		}
+		if result.ReviewID != "" {
+			fmt.Printf(" reviewer=%s", result.ReviewID)
+		}
+		if result.Reason != "" {
+			fmt.Printf(" (%s)", result.Reason)
+		}
+		fmt.Println()
+	}
+	return nil
 }
 
 // ticketAdapter is the YouTrack side of the lifecycle. It validates with the
@@ -158,8 +230,13 @@ func (t *ticketAdapter) Read(ctx context.Context, issue string) (coordinator.Tic
 			VerifiedCommit:     fields[youtrack.FieldPreliveVerified],
 			RecordedSessionID:  fields[youtrack.FieldCodingSession],
 			CoderModel:         fields[youtrack.FieldCoderModel],
+			Branch:             fields[youtrack.FieldBranch],
+			WorktreePath:       fields[youtrack.FieldWorktreePath],
+			ReviewRequestedAt:  fields[youtrack.FieldReviewRequestedAt],
 		},
-		Fields: fields,
+		Fields:      fields,
+		Summary:     current.Summary,
+		Description: current.Description,
 	}, nil
 }
 
@@ -220,10 +297,15 @@ func defaultRunDir() string {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, `usage: ao-coordinator <start|review|prelive|status> --issue CKM-825 [flags]
+	fmt.Fprintln(os.Stderr, `usage: ao-coordinator <start|review|prelive|schedule|status> --issue CKM-825 [flags]
 
-start    dispatch or resume the coder for a ticket (requires --approved)
-review   review the submitted commit, return findings, re-review corrected commits
-prelive  run the configured pre-live check and only then claim release readiness
-status   print the durable run record`)
+start     dispatch or adopt the coder, then supervise the lifecycle (requires --approved)
+review    resume supervision of an existing run without dispatching
+prelive   run the configured pre-live check and only then claim release readiness
+schedule  poll explicitly approved runs for Review Requested At and review once (no --issue)
+status    print the durable run record
+
+start also accepts --no-watch to dispatch and exit. Supervision is single-owner:
+a second process for the same ticket is refused. The scheduler uses
+Review Requested At, never the issue's general updated time.`)
 }

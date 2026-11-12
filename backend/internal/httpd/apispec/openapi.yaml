@@ -17125,6 +17125,8 @@ components:
           type: string
         projectId:
           type: string
+        providerConversationId:
+          type: string
         provisionError:
           type: string
         provisionState:

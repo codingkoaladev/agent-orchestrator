@@ -2990,12 +2990,14 @@ func previewFileURL(r *http.Request, id domain.SessionID, entry string) (string,
 func sessionView(r *http.Request, s domain.Session) SessionView {
 	terminalGeneration := s.Metadata.RuntimeLaunchID
 	view := SessionView{
-		Session:            s,
-		Branch:             s.Metadata.Branch,
-		TerminalGeneration: terminalGeneration,
-		PreviewURL:         s.Metadata.PreviewURL,
-		PreviewRevision:    s.Metadata.PreviewRevision,
-		Model:              s.Metadata.Model,
+		Session:                s,
+		AgentSessionID:         s.Metadata.AgentSessionID,
+		ProviderConversationID: s.Metadata.ProviderConversationID,
+		Branch:                 s.Metadata.Branch,
+		TerminalGeneration:     terminalGeneration,
+		PreviewURL:             s.Metadata.PreviewURL,
+		PreviewRevision:        s.Metadata.PreviewRevision,
+		Model:                  s.Metadata.Model,
 		LastUserMessageAt: func() *time.Time {
 			if s.Metadata.LatestUserPromptAt.IsZero() {
 				return nil

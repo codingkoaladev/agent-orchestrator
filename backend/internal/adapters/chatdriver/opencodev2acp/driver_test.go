@@ -368,3 +368,28 @@ func TestOtherOpenCodeHarnessCannotResumeColdConversation(t *testing.T) {
 		})
 	}
 }
+
+// A worker's pinned subscription must decide its OpenCode data home, so a
+// restart or resume keeps the same account scope instead of falling back to the
+// daemon-wide one.
+func TestConfigureUsesTheWorkersPinnedSubscription(t *testing.T) {
+	dataDir := t.TempDir()
+	t.Setenv("AO_DATA_DIR", dataDir)
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("AO_OPENCODE_SUBSCRIPTION", "subscription-3")
+
+	if err := opencode.PinSessionLabel(dataDir, "pilot-9", "subscription-1"); err != nil {
+		t.Fatalf("PinSessionLabel() error = %v", err)
+	}
+	_, env, err := configure(context.Background(), acpdriver.LaunchConfig{
+		SessionID: "pilot-9",
+		Env:       map[string]string{},
+	})
+	if err != nil {
+		t.Fatalf("configure() error = %v", err)
+	}
+	home := env["XDG_DATA_HOME"]
+	if !strings.Contains(home, "opencode-subscriptions/subscription-1") {
+		t.Fatalf("XDG_DATA_HOME = %q, want the pinned subscription-1 scope", home)
+	}
+}

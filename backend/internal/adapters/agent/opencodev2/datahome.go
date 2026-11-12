@@ -10,3 +10,9 @@ import (
 // preserving any pre-isolation OpenCode store. Its database and sessions live
 // under <data home>/opencode-v2-home/opencode.
 func DataHome(ctx context.Context) (string, error) { return opencode.PrepareV2DataHome(ctx) }
+
+// PrepareDataHomeForLabel prepares the data home for a worker's subscription
+// label, falling back to the default store when the worker has no label.
+func PrepareDataHomeForLabel(ctx context.Context, label string) (string, error) {
+	return opencode.PrepareV2DataHomeForLabel(ctx, label)
+}

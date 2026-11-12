@@ -73,7 +73,11 @@ func (p *Plugin) GetRestoreCommand(ctx context.Context, cfg ports.RestoreConfig)
 	if err != nil {
 		return nil, false, err
 	}
-	cmd, err := command(ctx, binary, ports.LaunchConfig{Config: cfg.Config, SessionID: cfg.Session.ID, Permissions: cfg.Permissions, Prompt: cfg.Prompt, SystemPrompt: cfg.SystemPrompt, SystemPromptFile: cfg.SystemPromptFile}, nativeID)
+	label, err := opencode.LabelForSession(nil, cfg.Session.ID, "")
+	if err != nil {
+		return nil, false, fmt.Errorf("opencode-v2: resolve pinned subscription: %w", err)
+	}
+	cmd, err := commandWithLabel(ctx, binary, ports.LaunchConfig{Config: cfg.Config, SessionID: cfg.Session.ID, Permissions: cfg.Permissions, Prompt: cfg.Prompt, SystemPrompt: cfg.SystemPrompt, SystemPromptFile: cfg.SystemPromptFile}, nativeID, label)
 	return cmd, err == nil, err
 }
 
@@ -81,6 +85,12 @@ func (p *Plugin) GetRestoreCommand(ctx context.Context, cfg ports.RestoreConfig)
 // default_agent in the highest-precedence inline config. --prompt=<value>
 // keeps even leading-dash prompts a single string value in the Effect CLI.
 func command(ctx context.Context, binary string, cfg ports.LaunchConfig, nativeID string) ([]string, error) {
+	return commandWithLabel(ctx, binary, cfg, nativeID, "")
+}
+
+// commandWithLabel builds the argv. forcedLabel pins the account scope on a
+// resume, where the project environment is not available to the adapter.
+func commandWithLabel(ctx context.Context, binary string, cfg ports.LaunchConfig, nativeID, forcedLabel string) ([]string, error) {
 	prompt := cfg.SystemPrompt
 	if prompt == "" && cfg.SystemPromptFile != "" {
 		data, err := os.ReadFile(cfg.SystemPromptFile)
@@ -96,9 +106,24 @@ func command(ctx context.Context, binary string, cfg ports.LaunchConfig, nativeI
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	dataHome, err := DataHome(ctx)
+	label := strings.TrimSpace(forcedLabel)
+	if label == "" {
+		resolved, err := opencode.LabelForSession(cfg.Env, cfg.SessionID, "")
+		if err != nil {
+			return nil, fmt.Errorf("opencode-v2: resolve subscription: %w", err)
+		}
+		label = resolved
+	}
+	dataHome, err := opencode.PrepareV2DataHomeForLabel(ctx, label)
 	if err != nil {
 		return nil, fmt.Errorf("opencode-v2: prepare data home: %w", err)
+	}
+	if label != "" {
+		// Pin the label to this worker so a resume reuses the same account scope
+		// even if the project configuration changes later.
+		if err := opencode.PinSessionLabel("", cfg.SessionID, label); err != nil {
+			return nil, fmt.Errorf("opencode-v2: pin subscription: %w", err)
+		}
 	}
 	var envArgs []string
 	envArgs = append(envArgs, "XDG_DATA_HOME="+dataHome)

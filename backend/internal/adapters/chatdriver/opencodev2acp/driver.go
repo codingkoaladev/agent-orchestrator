@@ -10,6 +10,7 @@ import (
 
 	acpsdk "github.com/coder/acp-go-sdk"
 
+	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/opencode"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/opencodev2"
 	acpdriver "github.com/aoagents/agent-orchestrator/backend/internal/adapters/chatdriver/acp"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/chatdriver/nativeacp"
@@ -44,9 +45,19 @@ func configure(ctx context.Context, cfg acpdriver.LaunchConfig) ([]string, map[s
 	if err != nil {
 		return nil, nil, err
 	}
-	dataHome, err := opencodev2.DataHome(ctx)
+	label, err := opencode.LabelForSession(cfg.Env, string(cfg.SessionID), "")
+	if err != nil {
+		return nil, nil, fmt.Errorf("opencode-v2 ACP: resolve subscription: %w", err)
+	}
+	dataHome, err := opencodev2.PrepareDataHomeForLabel(ctx, label)
 	if err != nil {
 		return nil, nil, fmt.Errorf("opencode-v2 ACP: prepare data home: %w", err)
+	}
+	if label != "" {
+		// Keep this worker's account scope stable across restarts and resumes.
+		if err := opencode.PinSessionLabel("", string(cfg.SessionID), label); err != nil {
+			return nil, nil, fmt.Errorf("opencode-v2 ACP: pin subscription: %w", err)
+		}
 	}
 	env := map[string]string{"OPENCODE_CONFIG_CONTENT": content, "XDG_DATA_HOME": dataHome}
 	return []string{"acp"}, env, nil

@@ -5862,6 +5862,7 @@ export interface components {
         };
         ControllersSessionView: {
             activity: components["schemas"]["DomainActivity"];
+            agentSessionId?: string;
             artifactFiles?: components["schemas"]["SessionArtifact"][];
             autoInjectCI: boolean;
             autoInjectReview: boolean;
@@ -5903,6 +5904,7 @@ export interface components {
             previewRevision?: number;
             previewUrl?: string;
             projectId?: string;
+            providerConversationId?: string;
             provisionError?: string;
             /** @enum {string} */
             provisionState?: "provisioning" | "ready" | "failed";
